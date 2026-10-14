@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- design/AppIcon.svg's iMac and tilted tablet, without its blurs and gloss, scaled into the
+     adaptive icon's 66 dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="1024" android:viewportHeight="1024">
+    <group android:pivotX="512" android:pivotY="512" android:scaleX="0.62" android:scaleY="0.62" android:translateY="28">
+        <!-- the iMac -->
+        <path android:pathData="M392,672h240a20,20 0 0 1 0,40h-240a20,20 0 0 1 0,-40z" android:fillColor="#FF6A6C74" />
+        <path android:pathData="M480,630h64v50h-64z" android:fillColor="#FF6A6C74" />
+        <path android:pathData="M236,176h552a60,60 0 0 1 60,60v336a60,60 0 0 1 -60,60h-552a60,60 0 0 1 -60,-60v-336a60,60 0 0 1 60,-60z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear" android:startX="176" android:startY="176" android:endX="848" android:endY="632">
+                    <item android:offset="0" android:color="#FA7C7E86" />
+                    <item android:offset="1" android:color="#F54C4E56" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path android:pathData="M240,204h544a36,36 0 0 1 36,36v280a36,36 0 0 1 -36,36h-544a36,36 0 0 1 -36,-36v-280a36,36 0 0 1 36,-36z" android:fillColor="#F707080A" />
+        <!-- the tablet, tilted -->
+        <group android:pivotX="520" android:pivotY="392" android:rotation="-5">
+            <path android:pathData="M364,240h312a48,48 0 0 1 48,48v204a48,48 0 0 1 -48,48h-312a48,48 0 0 1 -48,-48v-204a48,48 0 0 1 48,-48z" android:fillColor="#FF2A2F3A" />
+            <path android:pathData="M370,266h300a28,28 0 0 1 28,28v192a28,28 0 0 1 -28,28h-300a28,28 0 0 1 -28,-28v-192a28,28 0 0 1 28,-28z" android:fillColor="#FFF7F8FA" />
+            <path android:pathData="M388,296h264a20,20 0 0 1 20,20v140a20,20 0 0 1 -20,20h-264a20,20 0 0 1 -20,-20v-140a20,20 0 0 1 20,-20z" android:fillColor="#FFFFFFFF" />
+            <path android:pathData="M388,296h264a20,20 0 0 1 20,20v20h-304v-20a20,20 0 0 1 20,-20z" android:fillColor="#FF9BB7FF" />
+            <path android:pathData="M401,362h136a7,7 0 0 1 0,14h-136a7,7 0 0 1 0,-14z" android:fillColor="#E65A5F6B" />
+            <path android:pathData="M401,392h196a7,7 0 0 1 0,14h-196a7,7 0 0 1 0,-14z" android:fillColor="#8C5A5F6B" />
+            <path android:pathData="M401,422h96a7,7 0 0 1 0,14h-96a7,7 0 0 1 0,-14z" android:fillColor="#8C5A5F6B" />
+        </group>
+    </group>
+</vector>
