@@ -1,0 +1,74 @@
+name: Release
+
+# Pushing a tag such as v0.5.1 builds a signed release APK and publishes it as a GitHub Release,
+# which Obtainium picks up. The versionCode is the workflow run number, so each release installs
+# over the one before it; versionName comes from app/build.gradle.kts and should match the tag.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Signed release APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-37.0 build-tools;37.0.0
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest
+
+      - name: Decode the release keystore
+        run: echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+
+      - name: Check the tag against versionName
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          name="$(sed -nE 's/^\s*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts)"
+          echo "tag=$tag versionName=$name"
+          [ "$tag" = "$name" ] || { echo "::error::tag v$tag does not match versionName $name in app/build.gradle.kts"; exit 1; }
+
+      - name: Release APK
+        run: ./gradlew assembleRelease
+        env:
+          SILL_VERSION_CODE: ${{ github.run_number }}
+          SILL_KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          SILL_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          SILL_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          SILL_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+
+      - name: Name and checksum the APK
+        run: |
+          out="sill-android-${GITHUB_REF_NAME}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$out"
+          sha256sum "$out" > "$out.sha256"
+          "$ANDROID_HOME"/build-tools/37.0.0/apksigner verify --print-certs "$out" | head -5
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sill-android-*.apk
+            sill-android-*.apk.sha256
+          generate_release_notes: true
+          body: |
+            Sill for Android, built from this tag by GitHub Actions and signed with this repository's release key.
+            Install the APK directly, or add this repository to [Obtainium](https://github.com/ImranR98/Obtainium) to get updates.
+            Needs Sill for Mac 0.4.0 or later ([getsill.app](https://getsill.app)) and Android 10 or later.
+
+            Code by [Omar Marei](https://github.com/omarei-omoto) ([Saffsanity/sill#89](https://github.com/Saffsanity/sill/pull/89)); Sill is by [Noah Saffer](https://github.com/Saffsanity). Apache License 2.0.

@@ -1,0 +1,11 @@
+Sill for Android
+Copyright 2026 Omar Marei
+
+This is the Android client for Sill, written by Omar Marei (https://github.com/omarei-omoto)
+and proposed to the Sill project as https://github.com/Saffsanity/sill/pull/89. This repository
+carries that code, with its git history, so it can be built, released and installed on its own.
+
+Sill, its wire protocol (Sources/StreamProtocol) and Sill for Mac are by Noah Saffer
+(https://github.com/Saffsanity/sill), Copyright 2026 Noah Saffer.
+
+Both are licensed under the Apache License, Version 2.0 (see LICENSE).

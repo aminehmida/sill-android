@@ -12,9 +12,25 @@ android {
         // Android 10: TLS 1.3 and ALPN on SSLSocket (Conscrypt), which the doors require.
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
+        // CI passes the run number as SILL_VERSION_CODE so every release installs over the last.
+        versionCode = System.getenv("SILL_VERSION_CODE")?.toIntOrNull() ?: 1
         // One version for every Sill app (docs/release-checklist.md): the Mac's floor reads it.
         versionName = "0.5.1"
+    }
+
+    // Release signing: a keystore named by SILL_KEYSTORE_FILE (with SILL_KEYSTORE_PASSWORD,
+    // SILL_KEY_ALIAS and SILL_KEY_PASSWORD), as the release workflow sets from the repository's
+    // secrets. Without it, a local release build signs with the debug key.
+    val releaseKeystore = System.getenv("SILL_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }?.let { file(it) }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("SILL_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("SILL_KEY_ALIAS")
+                keyPassword = System.getenv("SILL_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -22,8 +38,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Local builds only; a store build signs with its own key.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
     buildFeatures {
