@@ -26,7 +26,14 @@ data class LinkStats(val fps: Int, val frameAgeMs: Int, val frameAgeMaxMs: Int, 
  * clock, a report every second, and liveness: no byte for max(6 s, 4 × the worst recent round trip)
  * ends it (a payload's every 256 KB counts, so a slow keyframe is not silence).
  */
-class Session(val conn: TlsConnection, private val deviceLabel: String, private val hello: String, private val listener: Listener) {
+class Session(
+    val conn: TlsConnection,
+    private val deviceLabel: String,
+    private val hello: String,
+    private val listener: Listener,
+    /** ClientStats' sound fields for the second just ended (SoundPlayer.takeSecond); nil: none played. */
+    private val soundStats: () -> Pair<Int, Int>? = { null },
+) {
     interface Listener {
         /** On the reader thread. Frames go straight to the decoder from here. */
         fun onMessage(session: Session, msg: Message)
@@ -170,6 +177,8 @@ class Session(val conn: TlsConnection, private val deviceLabel: String, private 
                         val sent = java.lang.Double.longBitsToDouble(ByteBuffer.wrap(m.payload).long)
                         val rtt = ((monotonic() - sent) * 1000).toInt().coerceAtLeast(0)
                         synchronized(lock) { rtts.add(rtt) }
+                    } else {
+                        listener.onMessage(this, m)     // a clipboard Paste's receipt (16 random bytes)
                     }
                     Kind.TICK -> Unit
                     else -> listener.onMessage(this, m)
@@ -209,7 +218,11 @@ class Session(val conn: TlsConnection, private val deviceLabel: String, private 
             frames = 0; ages.clear(); rtts.clear()
         }
         lastStats = stats
-        sendJson(Kind.CLIENT_STATS, Payloads.clientStats(stats.fps, stats.frameAgeMs, stats.rttMs, deviceLabel, stats.frameAgeMaxMs, stats.rttMaxMs))
+        val sound = runCatching(soundStats).getOrNull()
+        sendJson(Kind.CLIENT_STATS, Payloads.clientStats(
+            stats.fps, stats.frameAgeMs, stats.rttMs, deviceLabel, stats.frameAgeMaxMs, stats.rttMaxMs,
+            audioBehindMs = sound?.first, audioLate = sound?.second,
+        ))
         listener.onStats(this, stats)
     }
 

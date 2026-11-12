@@ -54,7 +54,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import me.saffer.sill.android.client.MenuState
 import me.saffer.sill.android.client.SillClient
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import me.saffer.sill.android.clipboard.ClipboardPasteButton
+import me.saffer.sill.android.clipboard.ClipboardPolicy
+import me.saffer.sill.android.clipboard.ClipboardSync
+import me.saffer.sill.android.protocol.LockedMac
 import me.saffer.sill.android.protocol.MacMenuItem
+import me.saffer.sill.android.protocol.TextScale
 import me.saffer.sill.android.protocol.QualityPreset
 import me.saffer.sill.android.protocol.SettingsChange
 import me.saffer.sill.android.protocol.StreamSource
@@ -81,7 +87,18 @@ private fun PanelFrame(modifier: Modifier, title: String, onDone: () -> Unit, ba
 fun AppsPanel(client: SillClient, modifier: Modifier, onDone: () -> Unit) {
     var query by remember { mutableStateOf("") }
     PanelFrame(modifier, "Apps", onDone) {
+        val why = client.lockWhy
+        if (why != null && !client.offConsoleView) {
+            // A locked Mac's list has no windows and no apps: say why instead (LockedMac.line).
+            Text(LockedMac.line(client.macName, why), fontSize = 14.sp, color = SillColors.secondaryText,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp))
+            return@PanelFrame
+        }
         LazyColumn(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+            if (client.offConsoleView) item {
+                Text(LockedMac.VIEW_PANEL_LINE, fontSize = 13.sp, color = SillColors.secondaryText,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+            }
             item {
                 Row(Modifier.fillMaxWidth().clickable { client.select(StreamSource.Desktop); onDone() }.padding(horizontal = 18.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -155,6 +172,9 @@ fun SettingsPanel(client: SillClient, modifier: Modifier, onDone: () -> Unit, on
                 ).joinToString(" · ").ifEmpty { "Connected" },
                 fontSize = 13.sp, color = SillColors.secondaryText,
             )
+            val why = client.lockWhy
+            if (client.offConsoleView) Note(LockedMac.VIEW_PANEL_LINE)
+            else if (why != null) Text(LockedMac.line(client.macName, why), fontSize = 13.sp, color = SillColors.accent)
             state?.away?.let { a ->
                 Text(
                     if (a.awayRunning) "Away: ${QualityPreset.shortTitle(a.awayBitrate, a.awayCaptureScale)}"
@@ -163,14 +183,10 @@ fun SettingsPanel(client: SillClient, modifier: Modifier, onDone: () -> Unit, on
                     fontSize = 13.sp, color = SillColors.accent,
                 )
             }
-            state?.link?.takeIf { it.isBehind }?.let { link ->
+            me.saffer.sill.android.protocol.AwayCopy.callout(state?.link, state?.away, client.macName)?.let { c ->
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0x33FFB020)).padding(12.dp)) {
-                    val cur = QualityPreset.name(link.bitrate)
-                    val sug = link.suggestedBitrate?.let { QualityPreset.shortTitle(it, link.suggestedCaptureScale ?: 1.0) }
-                    Text("The link can’t carry $cur." + (sug?.let { " $it is recommended." } ?: ""), fontSize = 14.sp)
-                    if (link.suggestedBitrate != null) TextButton(onClick = {
-                        client.changeSettings(SettingsChange(bitrate = link.suggestedBitrate, captureScale = link.suggestedCaptureScale))
-                    }) { Text("Use $sug") }
+                    Text(c.text, fontSize = 14.sp)
+                    if (c.button != null && c.change != null) TextButton(onClick = { client.changeSettings(c.change) }) { Text(c.button) }
                 }
             }
             if (state?.softwareEncoder == true) Note("${client.macName}’s hardware encoder is busy or not responding, so for now streams run at up to 60 fps at Standard.")
@@ -199,14 +215,64 @@ fun SettingsPanel(client: SillClient, modifier: Modifier, onDone: () -> Unit, on
                 }
                 state?.virtualDisplayNote?.let { Note(it) }
                 s.directWireless?.let { dw ->
-                    Toggle("Direct Wireless Connection", dw, enabled = client.route == null) { client.changeSettings(SettingsChange(directWireless = it)) }
+                    // Every device sees it; only a paired one at home changes it (HostSettingsState.sessionPaired).
+                    val canChange = client.sessionPaired != false && state?.away?.thisConnectionAway != true
+                    Toggle("Direct Wireless Connection", dw, enabled = canChange) { client.changeSettings(SettingsChange(directWireless = it)) }
+                    if (!canChange) Note("Only a paired device at home can change this.")
+                }
+                Group("Sound")
+                if (s.sendAudio == null) {
+                    Toggle("Send Audio (Beta)", false, enabled = false) {}
+                    Note("Update Sill on ${client.macName} to hear its sound here.")
+                } else {
+                    Toggle("Send Audio (Beta)", s.sendAudio, pending = client.ledger.isPending(me.saffer.sill.android.client.SettingsLedger.Field.SEND_AUDIO)) {
+                        client.changeSettings(SettingsChange(sendAudio = it))
+                    }
+                    Note("Plays the sound of the window you stream, or of every app for the Desktop, on every connected device.")
+                    state?.audioNote?.takeIf { s.sendAudio }?.let { Note(it) }
+                    if (client.sound == null || client.sound?.codecs?.isEmpty() == true) Note("This device can’t play ${client.macName}’s sound.")
                 }
                 if (state?.persistent == false) Note("Changes last until SillHost quits.")
             }
-            Group("This ${deviceWord(androidx.compose.ui.platform.LocalContext.current)}")
+            val word = deviceWord(androidx.compose.ui.platform.LocalContext.current)
+            Group("This $word")
+            if (client.macHasSound) {
+                Toggle("Mute", client.soundMuted) { client.changeSoundMuted(it) }
+                Note("Silences ${client.macName}’s sound on this $word only.")
+            }
+            // The clipboard (docs/clipboard-plan.md): only while the Mac shares it, as on iOS.
+            val clipboard = client.clipboard as? ClipboardSync
+            if (clipboard != null && clipboard.shared) {
+                val mac = client.macName
+                val on = client.shareClipboard
+                Toggle(ClipboardPolicy.Copy.SWITCH_TITLE, on) { client.changeShareClipboard(it) }
+                if (on) {
+                    Toggle(ClipboardPolicy.Copy.rightAwayTitle(mac), clipboard.pasteRightAway) { clipboard.changePasteRightAway(it) }
+                    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(ClipboardPolicy.Copy.rowTitle(mac), fontSize = 15.sp, modifier = Modifier.weight(1f))
+                        ClipboardPasteButton(
+                            hint = ClipboardPolicy.Copy.pasteHint(mac, word, clipboard.pasteRightAway),
+                            onClick = { client.pasteClipboard() }, enabled = clipboard.deviceHasText,
+                        )
+                    }
+                    // Announced as it came (ClipboardSync), so hidden from TalkBack here.
+                    clipboard.note?.let { n ->
+                        Text(n.text, fontSize = 12.sp, lineHeight = 16.sp, color = if (n.warning) Color(0xFFFF9F0A) else SillColors.accent,
+                            modifier = Modifier.clearAndSetSemantics { })
+                    }
+                }
+                Note(ClipboardPolicy.Copy.footnote(on, clipboard.pasteRightAway, mac, word))
+            }
             Toggle("Three-Finger Gestures", client.gesturesEnabled) { client.setGestures(it) }
             if (client.hostGestures < 1) Note("Update Sill on ${client.macName} for Mission Control, Spaces and more with three fingers.")
             else Note("Swipe up: Mission Control. Down: App Exposé. Left and right: Spaces. Pinch: Apps. Spread: Desktop.")
+            Toggle("Reverse Scrolling", client.reverseScroll) { client.changeReverseScroll(it) }
+            Note("A finger dragged over the picture, or two fingers on the trackpad below it, scroll the other way. A connected mouse or trackpad keeps the system’s own setting.")
+            HoldStepper(client.holdToShowControls) { client.changeHoldToShowControls(it) }
+            if (word == "phone") {
+                Toggle("Larger Picture", client.largerPicture) { client.changeLargerPicture(it) }
+                Note("Held upright, a window’s picture takes the place of the window thumbnails and reaches down to where the keyboard comes up.")
+            }
             Toggle("Show Stream Stats", client.showHud) { client.setHud(it) }
             Spacer(Modifier.size(8.dp))
             Button(onClick = onDisconnect, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0x33FF6B5E), contentColor = SillColors.danger)) {
@@ -229,22 +295,61 @@ private fun Choice(label: String, selected: Boolean, pending: Boolean = false, o
 }
 
 @Composable
-private fun Toggle(label: String, on: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+private fun Toggle(label: String, on: Boolean, enabled: Boolean = true, pending: Boolean = false, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, fontSize = 15.sp, modifier = Modifier.weight(1f), color = if (enabled) Color.White else SillColors.tertiaryText)
+        if (pending) CircularProgressIndicator(Modifier.padding(end = 8.dp).size(14.dp), strokeWidth = 2.dp)
         Switch(checked = on, onCheckedChange = onChange, enabled = enabled)
+    }
+}
+
+/** Hold to Show Window Controls (ThumbnailHold): 0.2 to 2 s, a tenth at a time. */
+@Composable
+private fun HoldStepper(seconds: Double, onChange: (Double) -> Unit) {
+    val tenths = Math.round(seconds * 10).toInt().coerceIn(2, 20)
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Hold to Show Window Controls", fontSize = 15.sp, modifier = Modifier.weight(1f))
+        Text(String.format(java.util.Locale.ROOT, "%.1f s", tenths / 10.0), fontSize = 15.sp, color = SillColors.secondaryText)
+        TextButton(onClick = { onChange((tenths - 1).coerceAtLeast(2) / 10.0) }, enabled = tenths > 2) { Text("−", fontSize = 20.sp) }
+        TextButton(onClick = { onChange((tenths + 1).coerceAtMost(20) / 10.0) }, enabled = tenths < 20) { Text("+", fontSize = 20.sp) }
     }
 }
 
 /** The Aa control: how large the Mac renders a window's text here (Viewport.scale), or leave the window alone. */
 @Composable
 fun ScalePanel(client: SillClient, modifier: Modifier, onDone: () -> Unit) {
+    // TextScale: Off (the Mac leaves the window alone) is offered only where no scale leaves it alone,
+    // which is everywhere but a window on the Mac's virtual display, where a window always fits.
+    val offered = offersOff(client)
+    val detents = TextScale.detents(offered)
+    val position = TextScale.position(client.textScale, offered)
+    var dragging by remember { mutableStateOf<Float?>(null) }
+    val shown = TextScale.snap((dragging ?: position.toFloat()).toDouble(), offered)
     PanelFrame(modifier, "Text Size", onDone) {
         Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 14.dp)) {
-            Note("Sizes the Mac window to this screen so its text shows at this scale. Off leaves the window as it is.")
-            Spacer(Modifier.size(6.dp))
-            Choice("Off", client.textScale == null) { client.chooseTextScale(null) }
-            listOf(0.5, 0.75, 1.0, 1.25, 1.5).forEach { v -> Choice(scaleLabel(v), client.textScale == v) { client.chooseTextScale(v) } }
+            Note(
+                if (offered) "Sizes the Mac window to this screen so its text shows at this scale. Off leaves the window as it is."
+                else "Sizes the window on Sill’s display so its text shows at this scale.",
+            )
+            Text(TextScale.title(shown), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 8.dp))
+            androidx.compose.material3.Slider(
+                value = (dragging ?: position.toFloat()),
+                onValueChange = { dragging = it },
+                onValueChangeFinished = {
+                    val p = TextScale.snap((dragging ?: position.toFloat()).toDouble(), offered)
+                    dragging = null
+                    client.chooseTextScale(TextScale.scaleAt(p))
+                },
+                valueRange = detents.first().toFloat()..detents.last().toFloat(),
+                steps = detents.size - 2,
+            )
+            Row(Modifier.fillMaxWidth()) {
+                detents.forEachIndexed { i, d ->
+                    Text(TextScale.title(d), fontSize = 11.sp, color = SillColors.secondaryText,
+                        textAlign = when (i) { 0 -> androidx.compose.ui.text.style.TextAlign.Start; detents.lastIndex -> androidx.compose.ui.text.style.TextAlign.End; else -> androidx.compose.ui.text.style.TextAlign.Center },
+                        modifier = Modifier.weight(1f))
+                }
+            }
         }
     }
 }

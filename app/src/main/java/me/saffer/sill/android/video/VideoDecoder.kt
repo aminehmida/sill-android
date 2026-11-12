@@ -29,6 +29,10 @@ class VideoDecoder(private val events: Events) {
         /** The codec cannot take this size; the client asks the Mac for Standard resolution. */
         fun onUnsupportedSize(width: Int, height: Int)
         fun onFrameRendered() {}
+        /** A picture that was showing is lost until a keyframe (KeyframeRecovery): decoder thread. */
+        fun onPictureInterrupted() {}
+        /** A keyframe was rendered: the picture is back. Decoder thread. */
+        fun onKeyframeShown() {}
     }
 
     private val thread = HandlerThread("sill-decoder", android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
@@ -44,6 +48,10 @@ class VideoDecoder(private val events: Events) {
     private val pending = ArrayDeque<Pending>()
     private var needKeyframe = true
     private var configuredSize: Pair<Int, Int>? = null
+    /** A frame of this codec's stream was rendered: losing it now is an interruption. */
+    private var shownSinceConfig = false
+    /** Presentation times of keyframes queued and not yet rendered. */
+    private val keyframePts = HashSet<Long>()
 
     private class Pending(val data: ByteArray, val ptsUs: Long, val key: Boolean)
 
@@ -74,7 +82,7 @@ class VideoDecoder(private val events: Events) {
                     output = target
                 } catch (e: Exception) {
                     Log.w(TAG, "setOutputSurface failed, rebuilding: ${e.message}")
-                    rebuild()
+                    rebuild(interrupted = true)
                 }
             } else {
                 output = target
@@ -106,9 +114,11 @@ class VideoDecoder(private val events: Events) {
         if (pending.size >= 30) {
             pending.clear()
             needKeyframe = !keyframe
-            if (needKeyframe) return@post
+            if (needKeyframe) { pictureLost(); return@post }
         }
-        pending.add(Pending(annexB, nextPts(hostTimestamp), keyframe))
+        val pts = nextPts(hostTimestamp)
+        if (keyframe) { keyframePts.add(pts); if (keyframePts.size > 16) keyframePts.clear() }
+        pending.add(Pending(annexB, pts, keyframe))
         feed()
     }
 
@@ -138,6 +148,26 @@ class VideoDecoder(private val events: Events) {
         if (queuedAt.size > 120) queuedAt.clear()
     }
 
+    /**
+     * The picture as it shows now, scaled to `width` pixels across (the Mac tiles' last picture), or nil
+     * when nothing shows. PixelCopy reads the screen's surface; `done` runs on the decoder thread.
+     */
+    fun capture(width: Int, done: (android.graphics.Bitmap?) -> Unit) = handler.post {
+        val surface = screen?.takeIf { it.isValid }
+        val size = configuredSize
+        if (surface == null || size == null || !shownSinceConfig || size.first <= 0) { done(null); return@post }
+        val h = (width.toLong() * size.second / size.first).toInt().coerceAtLeast(1)
+        val bmp = android.graphics.Bitmap.createBitmap(width, h, android.graphics.Bitmap.Config.ARGB_8888)
+        try {
+            android.view.PixelCopy.request(surface, bmp, { result ->
+                done(if (result == android.view.PixelCopy.SUCCESS) bmp else null)
+            }, handler)
+        } catch (e: Exception) {
+            Log.w(TAG, "capture: ${e.message}")
+            done(null)
+        }
+    }
+
     fun release() = handler.post {
         teardown()
         parked?.release(); parkTexture?.release()
@@ -163,10 +193,20 @@ class VideoDecoder(private val events: Events) {
         codec = null
         freeInputs.clear()
         pending.clear()
+        keyframePts.clear()
         needKeyframe = true
     }
 
-    private fun rebuild() {
+    /** The picture that was showing is gone until a keyframe: said once per loss. */
+    private fun pictureLost() {
+        if (!shownSinceConfig) return
+        shownSinceConfig = false
+        events.onPictureInterrupted()
+    }
+
+    /** `interrupted`: a codec that was showing this stream is rebuilt (an error, a surface), not a new stream. */
+    private fun rebuild(interrupted: Boolean = false) {
+        if (interrupted) pictureLost() else shownSinceConfig = false
         teardown()
         val ps = sets ?: return
         if (me.saffer.sill.android.BuildConfig.DEBUG) {
@@ -249,6 +289,8 @@ class VideoDecoder(private val events: Events) {
             runCatching { codec.releaseOutputBuffer(index, true) }
             noteOutput(info.presentationTimeUs)
             decodedFrames++
+            shownSinceConfig = true
+            if (keyframePts.remove(info.presentationTimeUs)) events.onKeyframeShown()
             events.onFrameRendered()
         }
         override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
@@ -257,7 +299,7 @@ class VideoDecoder(private val events: Events) {
             if (e.isTransient) return
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - errorWindowStart > 10_000) { errorWindowStart = now; errors = 0 }
-            if (++errors <= 5) handler.post { rebuild() } else Log.w(TAG, "codec keeps failing; waiting for new parameter sets")
+            if (++errors <= 5) handler.post { rebuild(interrupted = true) } else { pictureLost(); Log.w(TAG, "codec keeps failing; waiting for new parameter sets") }
         }
         override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
             Log.i(TAG, "decoder output ${format.getInteger(MediaFormat.KEY_WIDTH)}x${format.getInteger(MediaFormat.KEY_HEIGHT)}")
@@ -276,6 +318,7 @@ class VideoDecoder(private val events: Events) {
                     Log.w(TAG, "frame of ${f.data.size} bytes over the input buffer's ${buf.capacity()}")
                     c.queueInputBuffer(index, 0, 0, f.ptsUs, 0)
                     needKeyframe = true
+                    pictureLost()
                     continue
                 }
                 buf.put(f.data)

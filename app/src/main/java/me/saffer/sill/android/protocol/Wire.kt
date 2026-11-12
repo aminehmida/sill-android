@@ -47,6 +47,13 @@ object Kind {
     const val FETCH_MENU = 27
     // Trackpad gestures (Gesture.swift)
     const val GESTURE = 28
+    // The clipboard, both ways (Clipboard.swift): only to a host whose window list says `clipboard` ≥ 1,
+    // and from a host only to a connection that subscribed.
+    const val CLIPBOARD = 32
+    // Host → device: the Mac's sound (Audio.swift), only to a device whose hello lists a codec.
+    const val AUDIO = 43
+    // Device → host, empty payload: this device's picture was interrupted and waits for a keyframe.
+    const val KEYFRAME_REQUEST = 44
 }
 
 class Message(val kind: Int, val timestamp: Double, val isKeyframe: Boolean, val payload: ByteArray)
