@@ -5,7 +5,8 @@ These are Omar Marei's original notes from [Saffsanity/sill#89](https://github.c
 The client half of Sill for Android phones, tablets and foldables: a Mac window, or the whole
 Desktop, on the device, used with touch, a trackpad, a keyboard, a mouse or the S Pen. It speaks
 the same wire protocol as the iPhone and iPad app (`Sources/StreamProtocol`), so **Sill for Mac
-needs no change to serve it**: any Sill for Mac from 0.4.0 on (TLS doors with pairing).
+needs no change to serve it**: any Sill for Mac from 0.4.0 on (TLS doors with pairing); the clipboard, the Mac's sound, the locked Mac's
+cover and key repeat need Sill for Mac 0.6.0, and your own desktop while another user has the screen 0.6.1.
 
 ## Using it over Tailscale
 
@@ -61,9 +62,29 @@ Android 10 (API 29) or later: TLS 1.3 and ALPN on `SSLSocket` are what the Mac's
   Standard resolution by itself and says so.
 - No USB-cable pairing, Direct Wireless (AWDL is Apple's) or moving a live session between paths:
   a session that loses its path reconnects (home door first, then Tailscale).
-- The Aa text size is a list, not a slider; no first-run tour; no window reordering in the strip.
-- Typing goes through a "visible password" field so keyboards commit letters as typed; an IME that
-  still composes is followed by its difference.
+- No first-run tour, and no window reordering in the strip.
+- A touchpad on Android 13 and earlier scrolls as fingers do (its scroll events need Android 14).
+- The Mac's sound follows AudioPlayout's rules, timed from AudioTrack's timestamps instead of
+  AVAudioPlayerNode's render time; no audio focus is requested (iOS mixes with other apps too).
+- The clipboard has no change count: the chip keys on the clip's timestamp, and Android 13+ shows its
+  own notice when Sill writes text from the Mac. Paste reads the clipboard on the tap, so Android
+  12+ shows its "pasted" toast.
+- A foldable's laptop pose is read with Jetpack WindowManager (FoldingFeature), not iOS's hinge API.
+
+## What Sill for Mac 0.6 added, and where it lives here
+
+| Android | iOS / shared |
+|---|---|
+| `protocol/Policies.kt` | `ViewportBounds`, `TextScale`, `LockedMac`, `ScrollDirection`, `AwayCopy` |
+| `client/Modules.kt` | the two modules' interfaces, which `SillClient` drives |
+| `client/KeyframeRecovery.kt` | `KeyframeRecovery.swift` (kind 44) and `DeviceIdlePolicy.swift` |
+| `audio/*` | `Audio.swift` (kind 43), `AudioDecoder`, `AudioPlayout`, `AudioOutput`, `StreamClient+Audio` |
+| `clipboard/*` | `Clipboard.swift`, `ClipboardPolicy.swift` (kind 32), `StreamClient+Clipboard`, `ClipboardChip` |
+| `ui/input/StreamZoom.kt`, `StreamZoomState.kt` | `StreamZoom.swift` and InputOverlay's use of it |
+| `ui/input/TextComposition.kt` | `TextComposition.swift` |
+| `ui/input/HardwareKeys.kt` | `HardwareKeyboardPolicy.swift`, KeyChords' `ForwardedKeys` and `KeyTyping` |
+| `net/ConnectionList.kt`, `net/MacSnapshots.kt`, `ui/MacTiles.kt` | `ConnectionList.swift`, the tiles' pictures and groups |
+| `net/DiscoveryPolicy.kt` | `DiscoveryPolicy.swift` (#69: browsing again, the reconnect's clock) |
 
 ## Testing without a Mac app (DEBUG builds)
 

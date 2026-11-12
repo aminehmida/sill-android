@@ -15,7 +15,7 @@ android {
         // CI passes the run number as SILL_VERSION_CODE so every release installs over the last.
         versionCode = System.getenv("SILL_VERSION_CODE")?.toIntOrNull() ?: 1
         // One version for every Sill app (docs/release-checklist.md): the Mac's floor reads it.
-        versionName = "0.5.1"
+        versionName = "0.6.1"
     }
 
     // Release signing: a keystore named by SILL_KEYSTORE_FILE (with SILL_KEYSTORE_PASSWORD,
