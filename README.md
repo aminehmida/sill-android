@@ -42,8 +42,9 @@ release key, so later releases install over earlier ones.
 
 ## Requirements
 
-- A Mac with Apple silicon running [Sill for Mac](https://getsill.app/download) 0.4.0 or later
-  (`brew install --cask saffsanity/sill/sill`).
+- A Mac running [Sill for Mac](https://getsill.app/download) 0.4.0 or later
+  (`brew install --cask saffsanity/sill/sill`); 0.6.1 for everything below: copy and paste both
+  ways, the Mac's sound (Send Audio, a beta), a locked Mac's cover, and key repeat.
 - Android 10 or later. The device's HEVC decoder sets the largest picture it can show: many phones
   stop below a Retina capture, and the app then asks the Mac for Standard resolution by itself.
 - Both on the same Wi-Fi, or your own VPN such as Tailscale with Sill for Mac's **Remote Access**
@@ -57,6 +58,11 @@ release key, so later releases install over earlier ones.
 3. **Away, over Tailscale:** turn on Remote Access in Sill for Mac's settings, choose
    **Pair iPhone or iPad…** in its menu, and in the app tap **Add a Mac** and scan the code or type
    the address and code. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the details.
+
+As in Sill for iPhone and iPad 0.6.1: copy and paste between the Mac and the device, the Mac's
+sound, pinch to zoom, Larger Picture on phones, Reverse Scrolling, a hardware keyboard, mouse and
+touchpad that work as soon as the picture shows, typing in Chinese, Japanese and Korean, your Macs
+as tiles in groups, and a foldable's laptop pose with the keys above the keyboard.
 
 Compared with the iPhone and iPad app there is no USB-cable pairing, no Direct Wireless Connection
 and no first-run tour; `docs/DEVELOPMENT.md` lists the rest, and maps each Kotlin file to its Swift
