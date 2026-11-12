@@ -98,14 +98,15 @@ object Pairer {
             return PairOutcome.Failed(e.message ?: "Couldn’t reach ${link.name}.")
         }
         val endpoint = Endpoint(conn.host, conn.port)
-        // The link's addresses are the Mac's own list: keep them to dial until its kind 18 says more.
+        // The link's addresses are the Mac's own list: keep them to dial until its kind 18 says more,
+        // and its port, the Mac's remote port (SavedMacs.applyingLink, #140).
         val typed = endpoints.map { it.toString() }
-        return exchange(conn, link.secret, "qr", deviceName, model, endpoint, store, typed = typed)
+        return exchange(conn, link.secret, "qr", deviceName, model, endpoint, store, typed = typed, linkPort = link.port)
     }
 
     private fun exchange(
         conn: me.saffer.sill.android.crypto.TlsConnection, key: ByteArray, method: String, deviceName: String, model: String,
-        endpoint: Endpoint, store: SavedMacs, typed: List<String>,
+        endpoint: Endpoint, store: SavedMacs, typed: List<String>, linkPort: Int? = null,
     ): PairOutcome {
         val device = DeviceIdentity.get()
         val socket = conn.socket
@@ -129,14 +130,22 @@ object Pairer {
             if (r.macID != macID) return PairOutcome.Failed("The Mac’s answer named another key. Nothing was saved.")
             val now = Wire.now()
             val existing = store.byID(macID)
+            // What this pairing dialed first (the address that answered, then the link's or the typed
+            // one), then what an earlier pairing kept: never a link-local or loopback address, which
+            // names nothing from elsewhere (SavedMacs.keepable).
+            val keep = (listOf(endpoint.toString()) + typed + (existing?.typedAddresses ?: emptyList())).distinct().filter { a ->
+                Endpoint.parse(a, endpoint.port)?.let { SavedMacs.keepable(it.host, allowLoopback = me.saffer.sill.android.BuildConfig.DEBUG) } ?: false
+            }
+            // The link's port is the Mac's remote port until a verified kind 18 says otherwise.
+            val port = existing?.takeIf { it.infoIssuedAt > 0 }?.remotePort ?: linkPort?.takeIf { it in 1..65535 } ?: existing?.remotePort ?: endpoint.port
             val mac = SavedMac(
                 macID = macID,
                 fingerprint = conn.macFingerprint,
                 name = SafeText.label(r.name ?: "", 64).ifEmpty { existing?.name ?: "Mac" },
                 recognitionKey = r.recognitionKey,
-                remotePort = existing?.remotePort ?: endpoint.port,
+                remotePort = port,
                 addresses = existing?.addresses ?: emptyList(),
-                typedAddresses = (listOf(endpoint.toString()) + typed + (existing?.typedAddresses ?: emptyList())).distinct().take(8),
+                typedAddresses = keep.take(8),
                 infoIssuedAt = existing?.infoIssuedAt ?: 0.0,
                 lastWorked = endpoint.key,
                 pairedAt = now,

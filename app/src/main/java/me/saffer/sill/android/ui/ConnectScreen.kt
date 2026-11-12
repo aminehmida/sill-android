@@ -3,7 +3,6 @@ package me.saffer.sill.android.ui
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,7 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -22,22 +20,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +43,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -56,18 +54,58 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import me.saffer.sill.android.client.SillClient
-import me.saffer.sill.android.net.Endpoint
-import me.saffer.sill.android.net.SavedMac
+import me.saffer.sill.android.net.ConnectionList
+import me.saffer.sill.android.net.ConnectionPrefs
+import me.saffer.sill.android.net.MacSnapshots
 
 /**
- * The connect screen (iOSClient/ContentView.swift): the Macs this device paired with, and Add a Mac,
- * which pairs by the Mac's QR code or by its address and 12-digit code. Over Tailscale the address is
- * the one the Mac's pairing window shows (its MagicDNS name, or its 100.x address).
+ * The connect screen (iOSClient/ContentView.swift's ConnectScreen, ConnectionList.swift): every Mac
+ * this network lists and every saved Mac, as tiles with each Mac's screen as it was last left, or as
+ * a list (the button beside Connect to a Mac; remembered). Touch and hold a saved Mac to put it in a
+ * group (Home, Work, Personal, or a new one), shown as sections; the Macs in none come under Other.
+ * A Mac on this Wi‑Fi this device has not paired with is a row or tile of its own ("Not paired"): a
+ * tap asks it to show its code. Add a Mac, last, pairs by the Mac's QR code or by its address and
+ * 12-digit code; over Tailscale the address is the one the Mac's pairing window shows.
  */
 @Composable
 fun ConnectScreen(client: SillClient) {
     val context = LocalContext.current
     val connecting = client.phase as? SillClient.Phase.Connecting
+    val prefs = remember { ConnectionPrefs(context) }
+    var style by remember { mutableStateOf(prefs.style) }
+    var groups by remember { mutableStateOf(prefs.groups) }
+    /** The saved Mac whose New Group dialog is up. */
+    var newGroupFor by remember { mutableStateOf<String?>(null) }
+
+    // A Mac forgotten anywhere (here, a DEBUG extra, a re-pairing) leaves no group and no picture behind.
+    val savedIDs = client.savedMacs.map { it.macID }.toSet()
+    LaunchedEffect(savedIDs) {
+        val kept = ConnectionList.keepingSaved(groups, savedIDs)
+        if (kept != groups) { groups = kept; prefs.groups = kept }
+        MacSnapshots.prune(context, savedIDs)
+    }
+
+    val actions = MacMenuActions(
+        groups = groups,
+        style = style,
+        setGroup = { g, id -> groups = ConnectionList.settingGroup(g, id, groups); prefs.groups = groups },
+        newGroup = { id -> newGroupFor = id },
+        toggleStyle = { style = style.toggled; prefs.style = style },
+        removePicture = { id -> MacSnapshots.remove(context, id) },
+        forget = { mac ->
+            client.forget(mac)
+            groups = ConnectionList.settingGroup(null, mac.macID, groups); prefs.groups = groups
+            MacSnapshots.remove(context, mac.macID)
+        },
+    )
+    val entries = remember(client.savedMacs, client.homeMacs) { macEntries(client.savedMacs, client.homeMacs) }
+    val connectingID = if (connecting != null) client.currentMac?.macID else null
+    val onTap: (MacEntry) -> Unit = { e ->
+        val saved = e.saved
+        val home = e.home
+        if (saved != null) client.connect(saved) else if (home != null) client.tapHome(home)
+    }
+
     Box(Modifier.fillMaxSize().background(SillColors.background).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
         Column(
             Modifier.widthIn(max = 560.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 28.dp),
@@ -76,52 +114,40 @@ fun ConnectScreen(client: SillClient) {
             Text("Sill", fontSize = 40.sp, fontWeight = FontWeight.Bold)
             Text("Your Mac’s windows on this ${deviceWord(context)}.", color = SillColors.secondaryText, fontSize = 17.sp)
 
-            client.status?.let { s ->
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (connecting != null) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text(s, color = if (connecting != null) SillColors.secondaryText else SillColors.danger, fontSize = 15.sp)
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // The switch between rows and tiles beside the title: always, whichever style is on and
+                // whether or not a Mac is listed, so a choice of the list always has its way back.
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Connect to a Mac", fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f).padding(start = 4.dp).semantics { heading() })
+                    IconButton(onClick = actions.toggleStyle) {
+                        val tiles = style == ConnectionList.Style.TILES
+                        Icon(if (tiles) Icons.AutoMirrored.Filled.ViewList else Icons.Filled.GridView,
+                            contentDescription = if (tiles) "Show as list" else "Show as tiles", tint = SillColors.accent)
+                    }
                 }
-            }
 
-            if (client.savedMacs.isNotEmpty()) {
-                SectionTitle("Your Macs")
-                Column(Modifier.clip(RoundedCornerShape(16.dp)).background(SillColors.surface)) {
-                    client.savedMacs.forEachIndexed { i, mac ->
-                        if (i > 0) HorizontalDivider(color = SillColors.outline, modifier = Modifier.padding(start = 56.dp))
-                        MacRow(mac, connecting?.macName == mac.name && client.currentMac?.macID == mac.macID, home = client.homeOf(mac) != null,
-                            onTap = { client.connect(mac) }, onForget = { client.forget(mac) })
+                client.status?.let { s ->
+                    Row(Modifier.padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (connecting != null) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text(s, color = if (connecting != null) SillColors.secondaryText else SillColors.danger, fontSize = 15.sp)
+                    }
+                }
+
+                // Every Mac in its group, the groups in their order, then Other; one untitled section,
+                // the flat list it always was, while no Mac has a group.
+                val sections = ConnectionList.sections(entries, { it.macID }, groups)
+                sections.forEach { section ->
+                    section.title?.let { SectionTitle(it) }
+                    if (style == ConnectionList.Style.TILES) {
+                        MacTileGrid(section.items, connectingID, client.asking, actions, onTap)
+                    } else {
+                        MacRowCard(section.items, connectingID, client.asking, actions, onTap)
                     }
                 }
             }
 
-            // Macs on this Wi‑Fi this device has not paired with: a tap asks the Mac to show its code.
-            val nearby = client.unpairedHomeMacs
-            if (nearby.isNotEmpty()) {
-                SectionTitle("On this network")
-                Column(Modifier.clip(RoundedCornerShape(16.dp)).background(SillColors.surface)) {
-                    nearby.forEachIndexed { i, h ->
-                        if (i > 0) HorizontalDivider(color = SillColors.outline, modifier = Modifier.padding(start = 56.dp))
-                        Row(
-                            Modifier.fillMaxWidth().clickable { client.tapHome(h) }.padding(horizontal = 16.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(Icons.Filled.Computer, null, tint = SillColors.secondaryText, modifier = Modifier.size(24.dp))
-                            Spacer(Modifier.size(16.dp))
-                            Text(h.serviceName, fontSize = 17.sp, modifier = Modifier.weight(1f))
-                            if (client.asking == h.serviceName) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                            else Text(
-                                when (h.door) {
-                                    me.saffer.sill.android.net.HomeMac.Door.PLAIN -> "Update Sill"
-                                    else -> "Not paired"
-                                },
-                                color = SillColors.secondaryText, fontSize = 14.sp,
-                            )
-                        }
-                    }
-                }
-            }
-
-            AddMacCard(client, expandedAtStart = client.savedMacs.isEmpty() && nearby.isEmpty())
+            AddMacCard(client, expandedAtStart = entries.isEmpty())
 
             Text(
                 "Needs the free Sill app on your Mac, with Remote Access on (Sill › Settings › Remote Access). " +
@@ -129,6 +155,25 @@ fun ConnectScreen(client: SillClient) {
                 color = SillColors.tertiaryText, fontSize = 13.sp, lineHeight = 18.sp,
             )
         }
+    }
+
+    // New Group…: a blank name, or Other (where the Macs with no group already are), names no group.
+    newGroupFor?.let { macID ->
+        var name by remember(macID) { mutableStateOf("") }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { newGroupFor = null },
+            title = { Text("New Group") },
+            text = {
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                )
+            },
+            confirmButton = {
+                TextButton(enabled = ConnectionList.cleanGroup(name) != null, onClick = { actions.setGroup(name, macID); newGroupFor = null }) { Text("Add") }
+            },
+            dismissButton = { TextButton(onClick = { newGroupFor = null }) { Text("Cancel") } },
+        )
     }
 
     // The Mac opened its pairing window for this device's ask: its code, over the same door.
@@ -156,37 +201,8 @@ fun ConnectScreen(client: SillClient) {
 
 @Composable
 private fun SectionTitle(text: String) {
-    Text(text, color = SillColors.secondaryText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp))
-}
-
-@Composable
-private fun MacRow(mac: SavedMac, connecting: Boolean, home: Boolean, onTap: () -> Unit, onForget: () -> Unit) {
-    var menu by remember { mutableStateOf(false) }
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onTap).padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Filled.Computer, null, tint = SillColors.accent, modifier = Modifier.size(24.dp))
-        Spacer(Modifier.size(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(mac.name, fontSize = 17.sp, fontWeight = FontWeight.Medium)
-            val via = when {
-                mac.revoked -> "Removed this device. Pair it again."
-                home -> "Wi‑Fi"
-                mac.addresses.any { Endpoint.isTailscale(it.host) } || mac.typedAddresses.any { Endpoint.isTailscale(it.substringBefore(':')) } -> "Remote · Tailscale"
-                else -> "Remote"
-            }
-            Text(via, color = if (mac.revoked) SillColors.danger else SillColors.secondaryText, fontSize = 13.sp)
-        }
-        if (connecting) CircularProgressIndicator(Modifier.size(20.dp).padding(end = 4.dp), strokeWidth = 2.dp)
-        Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More for ${mac.name}", tint = SillColors.secondaryText) }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(text = { Text("Connect") }, onClick = { menu = false; onTap() })
-                DropdownMenuItem(text = { Text("Forget This Mac", color = SillColors.danger) }, onClick = { menu = false; onForget() })
-            }
-        }
-    }
+    Text(text, color = SillColors.secondaryText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(start = 4.dp, top = 4.dp).semantics { heading() })
 }
 
 @Composable

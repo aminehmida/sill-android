@@ -33,11 +33,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         client = SillClient.get(this)
+        if (client.clipboard == null) client.clipboard = me.saffer.sill.android.clipboard.ClipboardSync(applicationContext)
+        if (client.sound == null) client.sound = me.saffer.sill.android.audio.MacSound(applicationContext).also { it.onHeadphonesOut = client::headphonesOut }
         handle(intent)
         setContent {
             SillTheme {
                 androidx.compose.material3.Surface(color = androidx.compose.ui.graphics.Color.Black, contentColor = androidx.compose.ui.graphics.Color.White) {
-                    SillApp(client, pendingLink, onLinkAnswered = { pendingLink = null }, onStreaming = ::immersive)
+                    SillApp(client, pendingLink, onLinkAnswered = { pendingLink = null }, onStreaming = ::immersive, onHoldAwake = ::holdAwake)
                 }
             }
         }
@@ -51,6 +53,11 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         client.onForeground()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        (client.clipboard as? me.saffer.sill.android.clipboard.ClipboardSync)?.onFocusChanged(hasFocus)
     }
 
     override fun onStop() {
@@ -77,25 +84,34 @@ class MainActivity : ComponentActivity() {
         intent.getStringExtra("homeCode")?.let { client.pairHomeCode(it) }
     }
 
-    /** While streaming: no system bars (a swipe brings them back for a moment) and the screen stays on. */
+    /** While streaming: no system bars (a swipe brings them back for a moment). */
     private fun immersive(on: Boolean) {
         val c = WindowCompat.getInsetsController(window, window.decorView)
         if (on) {
             c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             c.hide(WindowInsetsCompat.Type.systemBars())
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             c.show(WindowInsetsCompat.Type.systemBars())
-            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+    }
+
+    /**
+     * The screen stays on while a stream is used (DeviceIdlePolicy): until 10 minutes after the last
+     * use, then the device's own screen timeout applies, and the session ends as it always did.
+     */
+    private fun holdAwake(on: Boolean) {
+        if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 }
 
 @Composable
-fun SillApp(client: SillClient, pendingLink: String?, onLinkAnswered: () -> Unit, onStreaming: (Boolean) -> Unit) {
+fun SillApp(client: SillClient, pendingLink: String?, onLinkAnswered: () -> Unit, onStreaming: (Boolean) -> Unit, onHoldAwake: (Boolean) -> Unit) {
     val phase = client.phase
     val streaming = phase is SillClient.Phase.Streaming || (phase is SillClient.Phase.Connecting && phase.reconnecting)
     LaunchedEffect(streaming) { onStreaming(streaming) }
+    val holdAwake = client.holdAwake
+    LaunchedEffect(holdAwake) { onHoldAwake(holdAwake) }
     if (streaming) StreamScreen(client) else ConnectScreen(client)
 
     if (pendingLink != null) {

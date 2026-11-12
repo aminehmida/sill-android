@@ -13,6 +13,7 @@ import android.view.VelocityTracker
 import android.view.View
 import me.saffer.sill.android.client.SillClient
 import me.saffer.sill.android.protocol.PointerAction
+import me.saffer.sill.android.protocol.ScrollDirection
 import me.saffer.sill.android.protocol.ScrollPhase
 import kotlin.math.hypot
 
@@ -21,7 +22,8 @@ import kotlin.math.hypot
  * Mac's pointer (a full swipe across the pad is 1.25 of the frame, no acceleration), a tap clicks, a
  * two-finger tap right-clicks, a hold (0.45 s) then drag drags, two fingers scroll with a coast, three
  * or four make a Mac gesture. The pad keeps its own cursor in frame fractions and sends absolute moves.
- * The latched modifiers of the key row wrap a click or a drag.
+ * The latched modifiers of the key row wrap a click or a drag. Reverse Scrolling turns the two-finger
+ * scroll and its coast around (ScrollDirection's pad), read as each scroll begins.
  */
 @SuppressLint("ViewConstructor")
 class TrackpadView(context: Context, private val client: SillClient) : View(context) {
@@ -48,6 +50,8 @@ class TrackpadView(context: Context, private val client: SillClient) : View(cont
     private var dragMods = 0L
     private var maxFingers = 0
     private var twoFingerScroll = false
+    /** -1 while Reverse Scrolling turns the scroll in progress around, else 1: read as each two-finger scroll begins. */
+    private var scrollFactor = 1.0
     private var silent = false
     private var trackingId = -1
 
@@ -144,9 +148,10 @@ class TrackpadView(context: Context, private val client: SillClient) : View(cont
                         moved = true
                         catchUp()
                         twoFingerScroll = true
+                        scrollFactor = ScrollDirection.factor(ScrollDirection.Source.PAD, client.reverseScroll)
                         client.scrollPhase(ScrollPhase.BEGAN, cx, cy)
                     }
-                    client.scroll(cx, cy, ((mx - lastX) / width).toDouble(), ((my - lastY) / ySpan()).toDouble())
+                    client.scroll(cx, cy, ((mx - lastX) / width) * scrollFactor, ((my - lastY) / ySpan()) * scrollFactor)
                     lastX = mx; lastY = my
                 } else {
                     val idx = e.findPointerIndex(trackingId).takeIf { it >= 0 } ?: 0
@@ -213,7 +218,8 @@ class TrackpadView(context: Context, private val client: SillClient) : View(cont
         if (coast) {
             coastX = cx; coastY = cy
             velocity?.computeCurrentVelocity(1000)
-            momentum.start(velocity?.xVelocity ?: 0f, velocity?.yVelocity ?: 0f)
+            // The coast goes the way the scroll went.
+            momentum.start(((velocity?.xVelocity ?: 0f) * scrollFactor).toFloat(), ((velocity?.yVelocity ?: 0f) * scrollFactor).toFloat())
         }
     }
 

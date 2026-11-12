@@ -73,22 +73,42 @@ object Payloads {
 
     fun windowCommand(id: Long, action: String): String = JSONObject().put("id", id).put("action", action).toString()
 
-    /** Viewport.swift: the stream panel in device points (dp here), the Aa scale or none, the rate. */
-    fun viewport(width: Double, height: Double, scale: Double?, fps: Int, localCursor: Boolean = true): String {
-        val o = JSONObject().put("width", width).put("height", height).put("fps", fps).put("localCursor", localCursor)
-        if (scale != null) o.put("scale", scale)
+    /**
+     * Viewport.swift: the stream panel in device points (dp here), the Aa scale or none, the rate.
+     * Held to ViewportBounds first, so no host refuses it; nil while the panel is not measured yet.
+     */
+    fun viewport(width: Double, height: Double, scale: Double?, fps: Int, localCursor: Boolean = true): String? {
+        val held = ViewportBounds.held(width, height, scale) ?: return null
+        val o = JSONObject().put("width", held.width).put("height", held.height).put("fps", fps).put("localCursor", localCursor)
+        if (held.scale != null) o.put("scale", held.scale)
         return o.toString()
     }
 
     fun ping(clock: Double): ByteArray = java.nio.ByteBuffer.allocate(8).putLong(java.lang.Double.doubleToRawLongBits(clock)).array()
 
-    fun clientStats(fps: Int, frameAgeMs: Int, rttMs: Int, device: String, frameAgeMaxMs: Int, rttMaxMs: Int): String =
-        JSONObject().put("fps", fps).put("frameAgeMs", frameAgeMs).put("rttMs", rttMs).put("device", device)
-            .put("frameAgeMaxMs", frameAgeMaxMs).put("rttMaxMs", rttMaxMs).toString()
+    /** Kind 12. `audioBehindMs` and `audioLate`: nil until this session played sound (Viewport.swift). */
+    fun clientStats(
+        fps: Int, frameAgeMs: Int, rttMs: Int, device: String, frameAgeMaxMs: Int, rttMaxMs: Int,
+        audioBehindMs: Int? = null, audioLate: Int? = null,
+    ): String {
+        val o = JSONObject().put("fps", fps).put("frameAgeMs", frameAgeMs).put("rttMs", rttMs).put("device", device)
+            .put("frameAgeMaxMs", frameAgeMaxMs).put("rttMaxMs", rttMaxMs)
+        audioBehindMs?.let { o.put("audioBehindMs", it) }
+        audioLate?.let { o.put("audioLate", it) }
+        return o.toString()
+    }
 
-    /** Kind 23, the first message of every session connection. */
-    fun hello(appVersion: String, build: String, device: String): String =
-        JSONObject().put("appVersion", appVersion).put("build", build).put("protocol", 1).put("device", device).toString()
+    /**
+     * Kind 23, the first message of every session connection. `audio`: the codecs of the Mac's sound
+     * this device plays, best first (a host sends kind 43 only then); `offConsoleView`: this device
+     * shows a Mac's off-console view (LockedMac.VIEW_GENERATION).
+     */
+    fun hello(appVersion: String, build: String, device: String, audio: List<String>? = null, offConsoleView: Int? = null): String {
+        val o = JSONObject().put("appVersion", appVersion).put("build", build).put("protocol", 1).put("device", device)
+        audio?.let { o.put("audio", JSONArray(it)) }
+        offConsoleView?.let { o.put("offConsoleView", it) }
+        return o.toString()
+    }
 
     /** Kind 17: only the fields one control changed, and a token. */
     fun changeSettings(token: Int, change: SettingsChange): String {
@@ -99,6 +119,7 @@ object Payloads {
         change.prioritizeSpeed?.let { o.put("prioritizeSpeed", it) }
         change.virtualDisplay?.let { o.put("virtualDisplay", it) }
         change.directWireless?.let { o.put("directWireless", it) }
+        change.sendAudio?.let { o.put("sendAudio", it) }
         return o.toString()
     }
 
@@ -139,6 +160,16 @@ data class WindowList(
     val hostVersion: String?,
     val protocol: Int?,
     val gestures: Int?,
+    /** The clipboard generation this host takes and sends (1: text); nil: send it no kind 32. */
+    val clipboard: Int? = null,
+    /** 1: the host repeats a key held down, so a hardware keyboard's characters may go as keys. */
+    val keyRepeat: Int? = null,
+    /** The Mac shows nothing of itself (locked, or another user on its console): LockedMac. */
+    val locked: Boolean? = null,
+    /** With `locked`: the console is not this session's (another user, the login window). */
+    val offConsole: Boolean? = null,
+    /** With `locked` and `offConsole`: the Mac shows this account's own desktop anyway, to look at. */
+    val offConsoleView: Boolean? = null,
 ) {
     companion object {
         fun parse(bytes: ByteArray): WindowList? = runCatching {
@@ -156,6 +187,11 @@ data class WindowList(
                 hostVersion = o.optStringOrNull("hostVersion"),
                 protocol = o.optIntOrNull("protocol"),
                 gestures = o.optIntOrNull("gestures"),
+                clipboard = o.optIntOrNull("clipboard"),
+                keyRepeat = o.optIntOrNull("keyRepeat"),
+                locked = o.optBooleanOrNull("locked"),
+                offConsole = o.optBooleanOrNull("offConsole"),
+                offConsoleView = o.optBooleanOrNull("offConsoleView"),
             )
         }.getOrNull()
     }
@@ -176,6 +212,8 @@ data class StreamSettings(
     val prioritizeSpeed: Boolean,
     val virtualDisplay: Boolean,
     val directWireless: Boolean?,
+    /** Send Audio, for every device; nil: a Mac without sound (the switch shows off, disabled). */
+    val sendAudio: Boolean? = null,
 )
 
 data class SettingsChange(
@@ -185,8 +223,10 @@ data class SettingsChange(
     val prioritizeSpeed: Boolean? = null,
     val virtualDisplay: Boolean? = null,
     val directWireless: Boolean? = null,
+    val sendAudio: Boolean? = null,
 ) {
-    val isEmpty get() = maxFPS == null && bitrate == null && captureScale == null && prioritizeSpeed == null && virtualDisplay == null && directWireless == null
+    val isEmpty get() = maxFPS == null && bitrate == null && captureScale == null && prioritizeSpeed == null && virtualDisplay == null &&
+        directWireless == null && sendAudio == null
 
     fun applied(s: StreamSettings) = s.copy(
         maxFPS = maxFPS ?: s.maxFPS,
@@ -195,6 +235,7 @@ data class SettingsChange(
         prioritizeSpeed = prioritizeSpeed ?: s.prioritizeSpeed,
         virtualDisplay = virtualDisplay ?: s.virtualDisplay,
         directWireless = directWireless ?: s.directWireless,
+        sendAudio = sendAudio ?: s.sendAudio,
     )
 }
 
@@ -222,6 +263,10 @@ data class HostSettingsState(
     val answering: Int?,
     val away: AwayQuality?,
     val link: LinkReport?,
+    /** Why no sound comes although Send Audio is on; nil while all is well. */
+    val audioNote: String? = null,
+    /** This connection's key is on the Mac's trust list (only then may it change Direct Wireless); nil from older Macs. */
+    val sessionPaired: Boolean? = null,
 ) {
     companion object {
         fun parse(bytes: ByteArray): HostSettingsState? = runCatching {
@@ -233,7 +278,8 @@ data class HostSettingsState(
                 captureScale = s.getDouble("captureScale"),
                 prioritizeSpeed = s.getBoolean("prioritizeSpeed"),
                 virtualDisplay = s.getBoolean("virtualDisplay"),
-                directWireless = if (s.has("directWireless") && !s.isNull("directWireless")) s.getBoolean("directWireless") else null,
+                directWireless = s.optBooleanOrNull("directWireless"),
+                sendAudio = s.optBooleanOrNull("sendAudio"),
             )
             val stream = o.optJSONObject("stream")?.let {
                 RunningStream(it.optInt("width"), it.optInt("height"), it.optInt("fps"), it.optInt("mbps"), it.optBoolean("onVirtualDisplay"))
@@ -260,6 +306,8 @@ data class HostSettingsState(
                 answering = o.optIntOrNull("answering"),
                 away = away,
                 link = link,
+                audioNote = o.optStringOrNull("audioNote"),
+                sessionPaired = o.optBooleanOrNull("sessionPaired"),
             )
         }.getOrNull()
     }
@@ -384,3 +432,4 @@ data class SignedMacInfo(val info: ByteArray, val key: ByteArray, val sig: ByteA
 fun JSONObject.optStringOrNull(key: String): String? = if (has(key) && !isNull(key)) optString(key) else null
 fun JSONObject.optIntOrNull(key: String): Int? = if (has(key) && !isNull(key)) optInt(key) else null
 fun JSONObject.optDoubleOrNull(key: String): Double? = if (has(key) && !isNull(key)) optDouble(key).takeIf { it.isFinite() } else null
+fun JSONObject.optBooleanOrNull(key: String): Boolean? = if (has(key) && !isNull(key)) (opt(key) as? Boolean) else null

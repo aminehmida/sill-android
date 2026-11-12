@@ -102,13 +102,52 @@ class SavedMacs(context: Context) {
     @Synchronized
     fun remove(macID: String) = save(all().filter { it.macID != macID })
 
+    @Synchronized
     fun clear() = save(emptyList())
 
+    /**
+     * Written to disk before it returns (`commit`, never `apply`): a Mac just paired stays saved when
+     * Sill is force-quit or killed right after (#140). iOS found a UserDefaults write safe once made
+     * (cfprefsd holds it); SharedPreferences' `apply` only queues the file write, and a process killed
+     * before the queue runs loses it. The list is a few kilobytes: a pairing writes it off the main
+     * thread, the rest (a session's first window list, its kind 18, Forget) once each.
+     */
     private fun save(list: List<SavedMac>) {
-        prefs.edit().putString(KEY, JSONArray(list.map { it.toJson() }).toString()).apply()
+        val ok = prefs.edit().putString(KEY, JSONArray(list.map { it.toJson() }).toString()).commit()
+        if (!ok) android.util.Log.w("SillSaved", "the saved Macs could not be written")
     }
 
-    companion object { private const val KEY = "savedMacs" }
+    companion object {
+        private const val KEY = "savedMacs"
+
+        /**
+         * Whether an address is worth saving for a later dial (SavedMacs.keepable): never a link-local
+         * one (169.254/16, fe80::/10, or one with a scope), which names a Mac on one link only, nor
+         * loopback (allowed for DEBUG builds' tests against a host on the same computer). The parsed
+         * host is classified, never a prefix a DNS name shares ("fearless.ts.net").
+         */
+        fun keepable(host: String, allowLoopback: Boolean): Boolean {
+            val h = host.trim().removePrefix("[").removeSuffix("]").lowercase()
+            if (h.isEmpty() || h.contains('%')) return false
+            val v4 = h.split('.')
+            if (v4.size == 4 && v4.all { p -> p.isNotEmpty() && p.length <= 3 && p.all(Char::isDigit) && p.toInt() in 0..255 }) {
+                if (v4[0] == "169" && v4[1] == "254") return false
+                if (v4[0] == "127") return allowLoopback
+                return true
+            }
+            if (h.contains(':')) {
+                if (h == "::1") return allowLoopback
+                // IPv4-mapped (::ffff:a.b.c.d): its IPv4 address decides.
+                if (h.startsWith("::ffff:") && h.substringAfterLast(':').contains('.')) return keepable(h.substringAfterLast(':'), allowLoopback)
+                val first = h.substringBefore(':')
+                if (first.isEmpty()) return true                              // "::…", not link-local
+                val word = first.toIntOrNull(16) ?: return false
+                return word and 0xffc0 != 0xfe80
+            }
+            if (h == "localhost" || h == "localhost.") return allowLoopback
+            return true
+        }
+    }
 }
 
 /** An address as typed or as the Mac lists it: host and port, IPv6 without brackets. */

@@ -49,9 +49,38 @@ object Keys {
         else -> 0L
     }
 
-    /** Keys that always go as keys, not text (KeyChords' keyUsages): arrows, esc, ⌦, home, end, pages, F-keys, modifiers. */
-    fun alwaysKey(usage: Int): Boolean = usage in 0x4F..0x52 || usage == ESCAPE || usage == 0x4C || usage == 0x4A ||
-        usage == 0x4D || usage == 0x4B || usage == 0x4E || usage in 0x3A..0x45 || usage in 0xE0..0xE7
+    /** Caps Lock is on: a state of this device's keyboard, never a key held down for the Mac. */
+    fun capsLock(meta: Int): Boolean = meta and KeyEvent.META_CAPS_LOCK_ON != 0
+
+    /**
+     * The keys the text path never delivers, which go to the Mac as keys whatever is held (KeyChords'
+     * ForwardedKeys.keyUsages): the arrows, escape, forward delete, home, end, page up and down, F1 to
+     * F12, and ⌘, ⌃ and ⌥ themselves (so a click while one is held is a modified click on the Mac).
+     * Shift is not one: it changes the character typed, which the text path already has.
+     */
+    val KEY_USAGES: Set<Int> = setOf(
+        0x4F, 0x50, 0x51, 0x52,                                                   // right, left, down, up
+        0x29, 0x4C, 0x4A, 0x4D, 0x4B, 0x4E,                                       // escape, forward delete, home, end, page up and down
+        0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45,   // F1…F12
+        0xE0, 0xE2, 0xE3, 0xE4, 0xE6, 0xE7,                                       // control, option, command, left and right
+    )
+
+    /** Return and tab: with shift held they go as keys too ("\n" and "\t" as text carry no shift). */
+    val SHIFTED_KEY_USAGES: Set<Int> = setOf(ENTER, TAB)
+
+    /**
+     * The keys a keyboard types characters with, which go to the Mac as keys while the Mac types them
+     * (KeyChords' characterUsages): the letters, the digits, Return, Delete, Tab, Space, the punctuation
+     * keys every layout has (- = [ ] \ ; ' ` , . /) and Shift's two keys. The keypad, the ISO keyboards'
+     * extra keys and Caps Lock stay the text path's whoever types.
+     */
+    val CHARACTER_USAGES: Set<Int> = (0x04..0x28).toSet() + setOf(BACKSPACE, TAB, SPACE) + (0x2D..0x31) + (0x33..0x38) + setOf(0xE1, 0xE5)
+
+    /** The letters A to Z, by their keys' places. */
+    val LETTER_USAGES = 0x04..0x1D
+
+    /** Keys that always go as keys, not text ([KEY_USAGES]). */
+    fun alwaysKey(usage: Int): Boolean = usage in KEY_USAGES
 
     fun usage(keyCode: Int): Int? = when (keyCode) {
         in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z -> 0x04 + (keyCode - KeyEvent.KEYCODE_A)
@@ -93,6 +122,42 @@ object Keys {
         KeyEvent.KEYCODE_ALT_RIGHT -> 0xE6
         KeyEvent.KEYCODE_META_RIGHT -> 0xE7
         else -> null
+    }
+
+    /**
+     * A hardware key's place on the keyboard (its Linux scan code, as the kernel maps a USB or Bluetooth
+     * keyboard's HID usages) back to that usage, for the keys whose characters a layout decides: the
+     * letters, digits and punctuation. Android's layouts (German, French…) remap those keys' key codes
+     * (Z and Y swapped, A and Q…), but the Mac takes a key by its place, as from a keyboard plugged into
+     * it, and its own layout makes the character (iOS sends UIKey.keyCode, the place, too).
+     */
+    fun usageForScanCode(scanCode: Int): Int? = SCAN_USAGES[scanCode]
+
+    /** A key event's usage: by its place for a character key ([usageForScanCode]), else by its key code (so a remapped modifier stays what the person made it). */
+    fun usage(keyCode: Int, scanCode: Int): Int? {
+        val byKey = usage(keyCode)
+        val byPlace = usageForScanCode(scanCode)
+        return if (byKey != null && byPlace != null && placed(byKey) && placed(byPlace)) byPlace else byKey
+    }
+
+    /** The keys a layout gives their characters: letters, digits and the punctuation keys. */
+    private fun placed(usage: Int): Boolean = usage in 0x04..0x27 || usage in 0x2D..0x38
+
+    private val SCAN_USAGES: Map<Int, Int> = buildMap {
+        // KEY_1…KEY_9, KEY_0
+        for (i in 0..8) put(2 + i, 0x1E + i)
+        put(11, 0x27)
+        put(12, 0x2D); put(13, 0x2E)                    // - =
+        // KEY_Q…KEY_P
+        listOf(0x14, 0x1A, 0x08, 0x15, 0x17, 0x1C, 0x18, 0x0C, 0x12, 0x13).forEachIndexed { i, u -> put(16 + i, u) }
+        put(26, 0x2F); put(27, 0x30)                    // [ ]
+        // KEY_A…KEY_L
+        listOf(0x04, 0x16, 0x07, 0x09, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F).forEachIndexed { i, u -> put(30 + i, u) }
+        put(39, 0x33); put(40, 0x34); put(41, 0x35)     // ; ' `
+        put(43, 0x31)                                   // \
+        // KEY_Z…KEY_M
+        listOf(0x1D, 0x1B, 0x06, 0x19, 0x05, 0x11, 0x10).forEachIndexed { i, u -> put(44 + i, u) }
+        put(51, 0x36); put(52, 0x37); put(53, 0x38)     // , . /
     }
 
     /** A typed character's key on a US keyboard, for a latched ⌃, ⌥ or ⌘ (HIDKey.usage(for:)). */

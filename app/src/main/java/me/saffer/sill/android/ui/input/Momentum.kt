@@ -1,7 +1,6 @@
 package me.saffer.sill.android.ui.input
 
 import android.view.Choreographer
-import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.pow
@@ -27,7 +26,7 @@ class ScrollMomentum(
     /** Velocity in px/s. Returns whether a coast started. */
     fun start(velocityX: Float, velocityY: Float): Boolean {
         stop()
-        if (hypot(velocityX, velocityY) / density < 150f) return false
+        if (hypot(velocityX, velocityY) / density <= 150f) return false
         vx = velocityX; vy = velocityY
         running = true
         onBegin()
@@ -52,7 +51,7 @@ class ScrollMomentum(
         lastNanos = now
         val decay = 0.96f.pow(dt * 60f)
         vx *= decay; vy *= decay
-        if (maxOf(abs(vx), abs(vy)) / 60f / density < 0.3f) { stop(); return }
+        if (hypot(vx, vy) / 60f / density < 0.3f) { stop(); return }
         onStep(vx * dt, vy * dt)
         Choreographer.getInstance().postFrameCallback(this)
     }

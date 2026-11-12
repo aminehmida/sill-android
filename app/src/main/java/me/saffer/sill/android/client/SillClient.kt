@@ -38,6 +38,8 @@ import me.saffer.sill.android.protocol.Goodbye
 import me.saffer.sill.android.protocol.HostSettingsState
 import me.saffer.sill.android.protocol.Input
 import me.saffer.sill.android.protocol.Kind
+import me.saffer.sill.android.protocol.LockedMac
+import me.saffer.sill.android.protocol.ScrollDirection
 import me.saffer.sill.android.protocol.MacInfo
 import me.saffer.sill.android.protocol.MacMenu
 import me.saffer.sill.android.protocol.MacMenuItem
@@ -97,9 +99,33 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     var hasSettings by mutableStateOf(false); private set
     var route by mutableStateOf<String?>(null); private set
 
+    // What this Mac's window list says beyond the windows (Sill for Mac 0.6).
+    /** The clipboard generation the Mac takes (1: text); 0: send it no kind 32. */
+    var hostClipboard by mutableIntStateOf(0); private set
+    /** 1: the Mac repeats a key held down, so a hardware keyboard's characters may go as keys. */
+    var hostKeyRepeat by mutableIntStateOf(0); private set
+    /** Why the Mac shows nothing of itself (locked, another user on its console); nil: it shows itself. */
+    var lockWhy by mutableStateOf<LockedMac.Why?>(null); private set
+    /** The off-console view: this account's own desktop while another user has the screen, to look at. */
+    var offConsoleView by mutableStateOf(false); private set
+    /** What covers the stream: another user on the Mac, then "Unlocking…" until the next keyframe. */
+    var lockShade by mutableStateOf<LockedMac.Shade?>(null); private set
+    private var shadeTimeout: Runnable? = null
+    /** This session's key is on the Mac's trust list (kind 16); nil before the Mac says, or an older Mac. */
+    val sessionPaired: Boolean? get() = hostState?.sessionPaired
+    /** The Mac has sound: its settings carry Send Audio, on or off. */
+    val macHasSound: Boolean get() = shownSettings?.sendAudio != null
+
+    // The Mac's sound (audio/) and the clipboard (clipboard/): set once, at start, by MainActivity.
+    @Volatile var sound: SoundPlayer? = null
+        set(value) { field = value; value?.muted = soundMuted }
+    var clipboard: ClipboardBridge? = null
+        set(value) { field = value; value?.enabled = shareClipboard }
+
     // Home: the Macs Bonjour lists on this network, and a pairing ask waiting for its code.
     var homeMacs by mutableStateOf(listOf<me.saffer.sill.android.net.HomeMac>()); private set
-    private val discovery = me.saffer.sill.android.net.HomeDiscovery(app) { homeMacs = it }
+    // Every change of what the network lists is a look for the automatic reconnect: a Mac that wakes is dialed.
+    private val discovery = me.saffer.sill.android.net.HomeDiscovery(app) { homeMacs = it; reconnectIfDue() }
     data class HomeAsk(val found: me.saffer.sill.android.net.HomeMac, val macFingerprint: ByteArray)
     var homeAsk by mutableStateOf<HomeAsk?>(null); private set
     var asking by mutableStateOf<String?>(null); private set
@@ -121,6 +147,23 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     var showHud by mutableStateOf(prefs.getBoolean("hud", false)); private set
     fun setGestures(on: Boolean) { gesturesEnabled = on; prefs.edit().putBoolean("trackpadGestures", on).apply() }
     fun setHud(on: Boolean) { showHud = on; prefs.edit().putBoolean("hud", on).apply() }
+    /** Mute: this device alone, at once; the Mac keeps sending. */
+    var soundMuted by mutableStateOf(prefs.getBoolean("soundMuted", false)); private set
+    /** Headphones or a Bluetooth output went away while the Mac's sound played: muted, as a video app pauses, and said. Main thread. */
+    fun headphonesOut() { if (soundMuted) return; changeSoundMuted(true); notice("Sound muted: headphones disconnected.") }
+    fun changeSoundMuted(on: Boolean) { noteAction(); soundMuted = on; sound?.muted = on; prefs.edit().putBoolean("soundMuted", on).apply() }
+    /** Share Clipboard: this device's own switch. */
+    var shareClipboard by mutableStateOf(prefs.getBoolean("shareClipboard", true)); private set
+    fun changeShareClipboard(on: Boolean) { noteAction(); shareClipboard = on; clipboard?.enabled = on; prefs.edit().putBoolean("shareClipboard", on).apply() }
+    /** Reverse Scrolling (ScrollDirection): the input views read the same preference when a scroll begins. */
+    var reverseScroll by mutableStateOf(prefs.getBoolean(ScrollDirection.PREF, false)); private set
+    fun changeReverseScroll(on: Boolean) { noteAction(); reverseScroll = on; prefs.edit().putBoolean(ScrollDirection.PREF, on).apply() }
+    /** Hold to Show Window Controls, in seconds (0.2 to 2; 0.5 by default). */
+    var holdToShowControls by mutableStateOf(prefs.getFloat("holdToShowControls", 0.5f).toDouble()); private set
+    fun changeHoldToShowControls(s: Double) { holdToShowControls = s.coerceIn(0.2, 2.0); prefs.edit().putFloat("holdToShowControls", holdToShowControls.toFloat()).apply() }
+    /** Larger Picture, on a phone held upright: the picture takes the thumbnails' place. */
+    var largerPicture by mutableStateOf(prefs.getBoolean("largerPicture", false)); private set
+    fun changeLargerPicture(on: Boolean) { noteAction(); largerPicture = on; prefs.edit().putBoolean("largerPicture", on).apply() }
 
     // The pointer sprite (PointerPresence): the Mac's while the Mac or another device moved it last,
     // this device's own only for the trackpad.
@@ -137,8 +180,12 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     private var sessionReady = false
     private var generation = 0
     private var goodbye: Goodbye? = null
-    private var lossAt = 0L
-    private var reconnectAttempt = 0
+    /** The automatic reconnect (DiscoveryPolicy, issue #69), the look it asked for, and whether its own dial is under way. */
+    private var autoReconnect: me.saffer.sill.android.net.ReconnectClock? = null
+    private var reconnectCheck: Runnable? = null
+    private var reconnectDialing = false
+    /** An open door's session: the key its first connection saw, which its reconnect pins (DiscoveryPolicy.reconnectTrust). */
+    private var openKey: ByteArray? = null
     private var userClosed = false
     private var lastAutoDesktopAt = 0L
     private var lastUserPickAt = 0L
@@ -303,7 +350,11 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
         goodbye = null
         sessionReady = false
         openSession = anyKey
-        if (!reconnecting) { reconnectAttempt = 0; lossAt = 0 }
+        // A tap starts afresh: no automatic reconnect left, and an open door is dialed with any key, as a tap always was.
+        if (!reconnecting) { endReconnect(); openKey = null }
+        // The reconnect of an open door's session pins the key that session saw (iOS's finding 3).
+        val pin = if (anyKey) openKey.takeIf { reconnecting } else mac.fingerprint
+        sessionStartAt = DeviceIdlePolicy.sessionStart(sessionStartAt, reconnecting, uptime())
         phase = Phase.Connecting(mac.name, reconnecting)
         status = if (reconnecting) "Reconnecting to ${mac.name}…" else "Connecting to ${mac.name}…"
         // A pairing that finished after the app left the screen: the session still lets go after its grace.
@@ -315,13 +366,19 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
         }
         Thread({
             try {
-                val conn = Dialer.dial(endpoints, Tls.SESSION_ALPN, if (anyKey) null else mac.fingerprint)
-                val hello = Payloads.hello(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toString(), deviceLabel)
-                val s = Session(conn, deviceLabel, hello, this)
+                val conn = Dialer.dial(endpoints, Tls.SESSION_ALPN, pin)
+                val hello = Payloads.hello(
+                    BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toString(), deviceLabel,
+                    audio = sound?.codecs?.takeIf { it.isNotEmpty() }, offConsoleView = LockedMac.VIEW_GENERATION,
+                )
+                val s = Session(conn, deviceLabel, hello, this, soundStats = { sound?.takeSecond() })
                 main.post {
                     if (gen != generation) { s.close("superseded"); return@post }
                     session = s
+                    if (anyKey && openKey == null) openKey = conn.macFingerprint
                     route = routeWord(conn.host)
+                    // Away (a VPN or the internet) until the Mac says: the sound's jitter allowance (AudioOutput).
+                    (sound as? me.saffer.sill.android.audio.MacSound)?.setAway(route != "Wi‑Fi" && route != "on this device")
                     s.start()
                     // A TLS session counts as connected at its first window list (10 s at most).
                     main.postDelayed({
@@ -338,15 +395,49 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
 
     private fun dialFailed(mac: SavedMac, message: String, reason: DialException.Reason?) {
         Log.i(TAG, "dial ${mac.name} failed: $message")
-        if (lossAt != 0L && reason != DialException.Reason.WRONG_MAC && scheduleReconnect(mac)) return
+        val r = autoReconnect
+        if (r != null && r.macID == mac.macID && reconnectDialing) {
+            reconnectDialing = false
+            if (reason == DialException.Reason.WRONG_MAC || reason == DialException.Reason.REFUSED_KEY) {
+                // The Mac answered for good: another key (at an open door, whatever now answers under its
+                // name), or this device's key refused. Not dialed again by itself; a tap still does.
+                endReconnect()
+                phase = Phase.Idle
+                status = if (reason == DialException.Reason.WRONG_MAC && openSession) {
+                    me.saffer.sill.android.net.DiscoveryPolicy.otherKeyLine(mac.name, deviceWord())
+                } else message
+                return
+            }
+            // One dial that did not connect: the reconnect looks again when its clock says.
+            r.dialFailed(uptime())
+            reconnectIfDue()
+            return
+        }
         phase = Phase.Idle
-        status = message
+        status = awayWords(mac, reason) ?: message
     }
 
+    /**
+     * Away from home, every address of the Mac a VPN's, and none answered: either end's VPN may be the
+     * one off (RemoteCopy.dialFailure's vpnOff, #309), so the words name both.
+     */
+    private fun awayWords(mac: SavedMac, reason: DialException.Reason?): String? {
+        if (homeOf(mac) != null) return null
+        if (reason != DialException.Reason.DNS && reason != DialException.Reason.TIMEOUT && reason != DialException.Reason.NETWORK) return null
+        val hosts = DialOrder.endpoints(mac).map { it.host }
+        if (hosts.isEmpty() || !hosts.all { Endpoint.isTailscale(it) || it.lowercase().endsWith(".ts.net") }) return null
+        return "Tailscale looks off on this ${deviceWord()} or on ${mac.name}. Turn it on for both, then tap ${mac.name}."
+    }
+
+    private fun deviceWord(): String = if (app.resources.configuration.smallestScreenWidthDp >= 600) "tablet" else "phone"
+
     fun disconnect() {
+        noteAction()
+        keepPicture()
         userClosed = true
         generation++
         resumeMac = null
+        endReconnect()
         session?.close("disconnected by the user")
         session = null
         endSessionState()
@@ -363,6 +454,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             resumeMac = mac
             userClosed = true
             generation++
+            endReconnect()          // the return starts one afresh (onForeground)
             session?.close("in the background")
             session = null
             endSessionState()
@@ -376,29 +468,79 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
 
     fun onForeground() {
         foreground = true
+        frontAt = uptime()
         suspendTask?.let(main::removeCallbacks); suspendTask = null
         session?.resetLiveness()
+        // Back on the screen (issue #69): a reconnect still running dials a listed row at once and counts
+        // again; then the browser is made again, its first look a look for the reconnect too.
+        autoReconnect?.cameForward(uptime())
         discovery.start()
-        resumeMac?.let { mac -> resumeMac = null; connect(store.byID(mac.macID) ?: mac, anyKey = openSession) }
+        clipboard?.onForeground()
+        reviewIdle()
+        considerKeyframe()
+        // A session let go in the background comes back through the automatic reconnect (issue #69):
+        // dialed at once, tried for a few minutes while the Mac does not answer (asleep, say), and
+        // connected to when it does.
+        resumeMac?.let { mac -> resumeMac = null; startReconnect(store.byID(mac.macID) ?: mac, onStream = false) }
+        reconnectIfDue()
     }
 
     /** The app left the screen: stop browsing (the session itself goes after its grace). */
     fun onStopped() {
         foreground = false
         discovery.stop()
+        recovery.leftForeground()
+        sound?.stop()
+        reviewIdle()
         onBackground()
     }
 
-    private fun scheduleReconnect(mac: SavedMac): Boolean {
-        val since = SystemClock.elapsedRealtime() - lossAt
-        if (since > 120_000) return false
-        val delay = when (reconnectAttempt) { 0 -> 2_000L; 1 -> 4_000L; 2 -> 8_000L; else -> 10_000L }
-        reconnectAttempt++
-        phase = Phase.Connecting(mac.name, true)
-        status = "Reconnecting to ${mac.name}…"
-        val gen = ++generation
-        main.postDelayed({ if (gen == generation) connect(store.byID(mac.macID) ?: mac, reconnecting = true, anyKey = openSession) }, delay)
-        return true
+    /**
+     * A session with `mac` ended by itself, or was let go in the background: the automatic reconnect
+     * (DiscoveryPolicy, issue #69). `onStream`: a session that was streaming keeps the stream screen
+     * while the reconnect is a blip; the connect screen, with its line, once the Mac looks asleep.
+     */
+    private fun startReconnect(mac: SavedMac, onStream: Boolean) {
+        endReconnect()
+        autoReconnect = me.saffer.sill.android.net.ReconnectClock(mac.macID, mac.name, uptime(), onStream)
+        reconnectIfDue()
+    }
+
+    private fun endReconnect() {
+        autoReconnect = null
+        reconnectDialing = false
+        reconnectCheck?.let(main::removeCallbacks); reconnectCheck = null
+    }
+
+    /**
+     * The automatic reconnect's look (StreamClient.reconnectIfListed): at a loss, a dial that did not
+     * connect, every change of what the network lists, the return to the screen, and the time it said
+     * to look again. Its Mac's row listed: a dial at once, then 5, 10, 20 and every 30 s while they do
+     * not connect, 12 at most, a listing seen afresh starting again; not listed: its addresses, 2, 4, 8,
+     * then every 10 s, for two minutes. Never in the background. Main thread.
+     */
+    private fun reconnectIfDue() {
+        reconnectCheck?.let(main::removeCallbacks); reconnectCheck = null
+        val r = autoReconnect ?: return
+        if (reconnectDialing || session != null) return
+        val mac = store.byID(r.macID) ?: currentMac?.takeIf { it.macID == r.macID } ?: run { endReconnect(); return }
+        val now = uptime()
+        when (val step = r.next(listedSince = if (openSession) null else homeOf(mac)?.since, foreground = foreground, now = now)) {
+            is me.saffer.sill.android.net.ReconnectClock.Step.Dial -> {
+                reconnectDialing = true
+                connect(mac, reconnecting = true, anyKey = openSession)
+                if (phase is Phase.Idle) { endReconnect(); return }      // nothing to dial: connect said why
+                if (!r.showsStream) phase = Phase.Connecting(mac.name, false)
+                status = step.line
+            }
+            is me.saffer.sill.android.net.ReconnectClock.Step.Wait -> {
+                phase = if (r.showsStream) Phase.Connecting(mac.name, true) else Phase.Idle
+                status = step.line
+                step.at?.let { at ->
+                    reconnectCheck = Runnable { reconnectIfDue() }.also { main.postDelayed(it, ((at - now) * 1000).toLong().coerceAtLeast(10)) }
+                }
+            }
+        }
     }
 
     private fun endSessionState() {
@@ -413,6 +555,12 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
         lastViewportJson = null
         unsupportedSize = null
         route = null
+        hostClipboard = 0; hostKeyRepeat = 0
+        lockWhy = null; offConsoleView = false; setShade(null)
+        sound?.stop()
+        clipboard?.onSessionEnded()
+        recovery.reset(); keyframeCheck?.let(main::removeCallbacks); keyframeCheck = null
+        reviewIdle()
     }
 
     // MARK: Session.Listener
@@ -422,7 +570,13 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             Kind.FRAME -> {
                 session.noteFrame(msg.timestamp)
                 decoder.onFrame(msg.payload, msg.isKeyframe, msg.timestamp)
+                sound?.onVideoFrame(msg.timestamp)
+                // The first keyframe after a locked Mac's unlock: its picture is back, the cover goes.
+                if (msg.isKeyframe && lockShade == LockedMac.Shade.Unlocking) {
+                    main.post { if (session === this.session) setShade(LockedMac.shadeAfterFrame(lockShade, keyframe = true)) }
+                }
             }
+            Kind.AUDIO -> if (session === this.session) sound?.onMessage(msg.payload, msg.timestamp)
             Kind.PARAMETER_SETS -> ParameterSets.parse(msg.payload)?.let { params = it; decoder.onParameterSets(it) }
             Kind.THUMBNAIL -> Blobs.thumbnail(msg.payload)?.let { t ->
                 val bmp = BitmapFactory.decodeByteArray(t.jpeg, 0, t.jpeg.size)?.asImageBitmap() ?: return
@@ -451,6 +605,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             this.session = null
             val mac = currentMac
             val wasStreaming = sessionReady
+            keepPicture()
             endSessionState()
             if (userClosed || mac == null) return@post
             val g = goodbye
@@ -459,15 +614,28 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             Log.i(TAG, "session ended (${why ?: "closed"}), goodbye=${g?.reason}, reconnect=$reconnect")
             if (g?.reason == "removed") store.update(mac.macID) { it.copy(revoked = true) }.also { savedMacs = store.all() }
             if (reconnect) {
-                if (lossAt == 0L || wasStreaming) { lossAt = SystemClock.elapsedRealtime(); reconnectAttempt = 0 }
-                if (scheduleReconnect(mac)) { status = words ?: "Reconnecting to $name…"; return@post }
+                val r = autoReconnect
+                if (r != null && r.macID == mac.macID && !wasStreaming) {
+                    // The reconnect's own dial ended before its first window list, with no goodbye that ends
+                    // it: one dial that did not connect, not a new loss (issue #69).
+                    reconnectDialing = false
+                    r.dialFailed(uptime())
+                    reconnectIfDue()
+                } else {
+                    startReconnect(mac, onStream = wasStreaming)
+                }
+                // The Mac's own words ("‹Mac› quit Sill.") stay until the reconnect's next line.
+                if (words != null && autoReconnect != null) status = words
+                return@post
             }
+            endReconnect()
             phase = Phase.Idle
             status = words ?: "Lost the connection to $name."
         }
     }
 
     override fun onStats(session: Session, stats: LinkStats) {
+        (sound as? me.saffer.sill.android.audio.MacSound)?.setRtt(stats.rttMs.takeIf { it >= 0 })
         main.post {
             if (session !== this.session) return@post
             this.stats = stats
@@ -498,6 +666,8 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             Kind.MAC_INFO -> SignedMacInfo.parse(msg.payload)?.let { macInfo(session, it) }
             // A goodbye without a readable reason is a notice that asks for nothing: no reconnect (GoodbyePolicy).
             Kind.GOODBYE -> goodbye = Goodbye.parse(msg.payload) ?: Goodbye("", null, null, null)
+            Kind.CLIPBOARD -> clipboard?.onMessage(msg.payload)
+            Kind.PONG -> (clipboard as? me.saffer.sill.android.clipboard.ClipboardSync)?.onReceipt(msg.payload)
             Kind.MAC_MENU -> MacMenu.parse(msg.payload)?.let { m ->
                 when (val o = menuState.receive(m)) {
                     is MenuState.Outcome.Pressed -> if (!o.ok) notice(o.note ?: "The menus changed. Open the menu again.")
@@ -515,6 +685,15 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
         macName = SafeText.label(list.macName, 64).ifEmpty { currentMac?.name ?: "Mac" }
         hostGestures = list.gestures ?: 0
         hostVersion = list.hostVersion
+        hostClipboard = list.clipboard ?: 0
+        hostKeyRepeat = list.keyRepeat ?: 0
+        val why = LockedMac.why(list)
+        val view = LockedMac.view(list)
+        if (why != lockWhy || view != offConsoleView) Log.i(TAG, "lock: ${why ?: "unlocked"}${if (view) ", the off-console view" else ""}")
+        lockWhy = why
+        offConsoleView = view
+        setShade(LockedMac.shade(lockShade, why, view))
+        if (why != null) sound?.stop()
         val ids = list.windows.map { it.id }.toSet()
         thumbnails.keys.retainAll(ids)
         val was = active
@@ -523,7 +702,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             sessionReady = true
             phase = Phase.Streaming
             status = null
-            lossAt = 0; reconnectAttempt = 0
+            endReconnect()
             currentMac?.let { mac ->
                 store.update(mac.macID) { it.copy(lastWorked = Endpoint(session.conn.host, session.conn.port).key, lastConnectedAt = me.saffer.sill.android.protocol.Wire.now()) }
                 savedMacs = store.all()
@@ -556,9 +735,26 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             }
         }
         previousActive = was
+        clipboard?.onWindowList(list) { bytes -> if (this.session === session) session.send(Kind.CLIPBOARD, bytes) }
+        reviewIdle()
+    }
+
+    /** The cover over the stream; "Unlocking…" lasts LockedMac.UNLOCKING_TIMEOUT_S at most. */
+    private fun setShade(next: LockedMac.Shade?) {
+        shadeTimeout?.let(main::removeCallbacks); shadeTimeout = null
+        lockShade = next
+        if (next == LockedMac.Shade.Unlocking) {
+            shadeTimeout = Runnable { if (lockShade == LockedMac.Shade.Unlocking) lockShade = null }
+                .also { main.postDelayed(it, (LockedMac.UNLOCKING_TIMEOUT_S * 1000).toLong()) }
+        }
     }
 
     private fun settingsState(state: HostSettingsState) {
+        if (state.settings.sendAudio == false) sound?.stop()
+        (sound as? me.saffer.sill.android.audio.MacSound)?.let { s ->
+            state.stream?.fps?.let(s::setStreamFPS)
+            state.away?.let { s.setAway(it.thisConnectionAway) }
+        }
         val refused = ledger.receive(state)
         hasSettings = true
         hostState = state
@@ -579,9 +775,8 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
         if (info.macID != MacId.make(fp)) return
         val mac = store.byID(info.macID) ?: return
         if (!java.security.MessageDigest.isEqual(mac.fingerprint, fp) || info.issuedAt <= mac.infoIssuedAt) return
-        val usable = info.addresses.filter { a ->
-            !Endpoint.isLoopback(a.host) && !a.host.contains('%') && !a.host.lowercase().startsWith("fe80:")
-        }
+        // Never link-local (169.254/16, all of fe80::/10, a scope) or loopback (SavedMacs.keepable).
+        val usable = info.addresses.filter { a -> SavedMacs.keepable(a.host, allowLoopback = false) }
         store.update(info.macID) { m ->
             m.copy(
                 name = SafeText.label(info.name, 64).ifEmpty { m.name },
@@ -612,6 +807,89 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
         main.post { handleUnsupported(width, height) }
     }
 
+    override fun onPictureInterrupted() {
+        main.post {
+            if (session == null) return@post
+            Log.i(TAG, "picture interrupted: waiting for a keyframe")
+            recovery.interrupted(uptime())
+            considerKeyframe()
+        }
+    }
+
+    override fun onKeyframeShown() {
+        main.post { recovery.pictureBack(uptime(), foreground) }
+    }
+
+    // MARK: the Mac's last picture, for its tile (ConnectionList, MacSnapshots)
+
+    /**
+     * The picture as the session leaves it, for the Mac's tile: only from the screen in front, for a
+     * saved Mac, while tiles are on (MacSnapshots.save checks again, and never keeps a black frame).
+     * Before the session's state goes, since the decoder's reset clears the surface.
+     */
+    private fun keepPicture() {
+        val mac = currentMac ?: return
+        if (openSession || !sessionReady) return
+        if (!me.saffer.sill.android.net.ConnectionList.takesPreview(me.saffer.sill.android.net.ConnectionPrefs(app).style, foreground, store.byID(mac.macID) != null)) return
+        val (w, _) = videoSize?.let { me.saffer.sill.android.net.ConnectionList.previewPixels(it.first, it.second) } ?: return
+        decoder.capture(w) { bmp -> bmp?.let { me.saffer.sill.android.net.MacSnapshots.save(app, mac.macID, it) } }
+    }
+
+    // MARK: keyframe recovery (kind 44)
+
+    private val recovery = KeyframeRecovery()
+    private var keyframeCheck: Runnable? = null
+
+    /** Ask the Mac for a keyframe when KeyframeRecovery says so, and look again when it is due. Main thread. */
+    private fun considerKeyframe() {
+        keyframeCheck?.let(main::removeCallbacks); keyframeCheck = null
+        val s = session ?: return
+        val streaming = sessionReady && active != StreamSource.None
+        val now = uptime()
+        val again = when (val d = recovery.consider(now, foreground, streaming, KeyframeRecovery.answerWait(stats?.rttMaxMs))) {
+            KeyframeRecovery.Decision.Nothing -> null
+            KeyframeRecovery.Decision.AskNow -> {
+                Log.i(TAG, "asking the Mac for a keyframe (repeat ${recovery.repeats})")
+                s.send(Kind.KEYFRAME_REQUEST)
+                now + KeyframeRecovery.answerWait(stats?.rttMaxMs)
+            }
+            is KeyframeRecovery.Decision.AskAt -> d.at
+            is KeyframeRecovery.Decision.KeyframeDue -> d.at
+        } ?: return
+        keyframeCheck = Runnable { considerKeyframe() }.also { main.postDelayed(it, ((again - now) * 1000).toLong().coerceAtLeast(50)) }
+    }
+
+    // MARK: holding the screen on (DeviceIdlePolicy)
+
+    /** Whether the screen is held on now: streaming, on screen, used in the last 10 minutes. */
+    var holdAwake by mutableStateOf(false); private set
+    @Volatile private var inputAt = 0.0
+    private var controlAt = 0.0
+    private var sessionStartAt: Double? = null
+    private var frontAt = 0.0
+    private var idleCheck: Runnable? = null
+
+    private fun uptime(): Double = SystemClock.elapsedRealtime() / 1000.0
+
+    /** One of the stream screen's controls was used: counts as use. Main thread. */
+    fun noteAction() { controlAt = uptime(); if (!holdAwake) reviewIdle() }
+
+    /** Input the person sent to the Mac: any thread. */
+    private fun noteInput() {
+        inputAt = uptime()
+        if (!holdAwake) main.post { reviewIdle() }
+    }
+
+    private fun reviewIdle() {
+        idleCheck?.let(main::removeCallbacks); idleCheck = null
+        val now = uptime()
+        val last = listOf(inputAt, controlAt, frontAt, sessionStartAt ?: 0.0).maxOrNull()?.takeIf { it > 0 }
+        val streaming = phase is Phase.Streaming && active != StreamSource.None
+        val ends = DeviceIdlePolicy.holdEnds(foreground, streaming, last, now)
+        holdAwake = ends != null
+        if (ends != null) idleCheck = Runnable { reviewIdle() }.also { main.postDelayed(it, ((ends - now) * 1000).toLong() + 50) }
+    }
+
     /** This device's decoder cannot take the stream (a Retina capture): ask the Mac for Standard. */
     private fun handleUnsupported(width: Int, height: Int) {
         val shown = ledger.shown
@@ -628,16 +906,20 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
 
     fun select(source: StreamSource, user: Boolean = true) {
         val s = session ?: return
-        if (user) lastUserPickAt = SystemClock.uptimeMillis()
+        onCaretMayMove?.invoke()
+        if (user) { lastUserPickAt = SystemClock.uptimeMillis(); noteAction() }
         s.sendJson(Kind.SELECT_SOURCE, Payloads.select(source))
     }
 
     fun launch(app: AppInfo) {
-        lastUserPickAt = SystemClock.uptimeMillis()
+        onCaretMayMove?.invoke()
+        lastUserPickAt = SystemClock.uptimeMillis(); noteAction()
         session?.sendJson(Kind.LAUNCH_APP, Payloads.launchApp(app.bundleID))
     }
 
     fun windowCommand(id: Long, action: String) {
+        onCaretMayMove?.invoke()
+        noteAction()
         session?.sendJson(Kind.WINDOW_COMMAND, Payloads.windowCommand(id, action))
     }
 
@@ -649,6 +931,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     }
 
     fun chooseTextScale(scale: Double?) {
+        noteAction()
         textScale = scale
         sendViewport(immediately = false)
     }
@@ -668,7 +951,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             val s = session ?: return@Runnable
             if (!sessionReady) return@Runnable
             val (w, h) = panel ?: return@Runnable
-            val json = Payloads.viewport(w, h, textScale, wantedFps())
+            val json = Payloads.viewport(w, h, textScale, wantedFps()) ?: return@Runnable
             if (json == lastViewportJson) return@Runnable
             lastViewportJson = json
             s.sendJson(Kind.VIEWPORT, json)
@@ -677,6 +960,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     }
 
     fun changeSettings(change: SettingsChange) {
+        noteAction()
         val s = session ?: return
         val (token, out) = ledger.pick(change, SystemClock.uptimeMillis()) ?: return
         s.sendJson(Kind.CHANGE_SETTINGS, Payloads.changeSettings(token, out))
@@ -691,6 +975,8 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     }
 
     fun chooseMenuItem(item: MacMenuItem) {
+        onCaretMayMove?.invoke()
+        noteAction()
         val s = session ?: return
         val r = menuState.choose(item, SystemClock.uptimeMillis()) ?: return
         s.sendJson(Kind.PRESS_MENU_ITEM, Payloads.pressMenuItem(r.token, r.version, r.id!!, r.title))
@@ -700,14 +986,25 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
 
     // MARK: input (kind 8), any thread
 
+    /**
+     * Something that may move the Mac's caret is about to go out (iOS's StreamClient.onCaretMayMove,
+     * called before it goes): a click, a key going down, a shortcut, a gesture, a pick, a launch, a
+     * window's button, a menu item. The stream screen's keyboard sink sends what an input method is
+     * still composing, then forgets what was typed (KeyboardSink.forgetTyped). Main thread.
+     */
+    var onCaretMayMove: (() -> Unit)? = null
+
     /** Positions are frame fractions. `trackpad` says the trackpad drew this device's pointer. */
     fun pointer(action: PointerAction, x: Double, y: Double, trackpad: Boolean = false) {
         val s = session ?: return
+        if (action == PointerAction.LEFT_DOWN || action == PointerAction.RIGHT_DOWN) onCaretMayMove?.invoke()
+        noteInput()
         s.sendInput(Input.pointer(action, x, y), isMove = action == PointerAction.MOVE)
         tookPointer(x, y, trackpad)
     }
 
     fun scroll(x: Double, y: Double, dx: Double, dy: Double) {
+        noteInput()
         session?.sendInput(Input.scroll(x, y, dx, dy))
         tookPointer(x, y, false)
     }
@@ -717,17 +1014,36 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     }
 
     fun text(t: String) {
+        noteInput()
         session?.sendInput(Input.text(t))
         main.post { pointerHere = true; ownPointerVisible = false }
     }
 
     fun key(usage: Int, down: Boolean, modifiers: Long) {
+        if (down) onCaretMayMove?.invoke()
+        noteInput()
         session?.sendInput(Input.key(usage, down, modifiers))
+    }
+
+    /**
+     * The clipboard's Paste (the chip's or the Settings row's): this device's text to the Mac, the
+     * receipt's ping after it on this session, and ⌘V once the Mac has it (Paste on ‹Mac› Right Away).
+     */
+    fun pasteClipboard() {
+        noteAction()
+        val s = session ?: return
+        (clipboard as? me.saffer.sill.android.clipboard.ClipboardSync)?.paste(
+            worstRttMs = stats?.rttMaxMs,
+            sendPing = { nonce -> if (session === s) s.send(Kind.PING, nonce) },
+            pressKey = { usage, modifiers -> if (session === s) press(usage, modifiers) },
+        )
     }
 
     /** A shortcut as a keyboard sends it: its modifiers' own keys around it (KeyChord.press). */
     fun press(usage: Int, modifiers: Long) {
         val s = session ?: return
+        onCaretMayMove?.invoke()
+        noteInput()
         val mods = Keys.modifierKeys(modifiers)
         var held = 0L
         for ((u, bit) in mods) { held = held or bit; s.sendInput(Input.key(u, true, held)) }
@@ -738,6 +1054,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
 
     fun modifiersDown(modifiers: Long) {
         val s = session ?: return
+        onCaretMayMove?.invoke()
         var held = 0L
         for ((u, bit) in Keys.modifierKeys(modifiers)) { held = held or bit; s.sendInput(Input.key(u, true, held)) }
     }
@@ -752,6 +1069,8 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     fun gesture(name: String, fingers: Int) {
         val s = session ?: return
         if (hostGestures < 1 || !gesturesEnabled) return
+        onCaretMayMove?.invoke()
+        noteInput()
         if (active is StreamSource.Window) s.sendJson(Kind.SELECT_SOURCE, Payloads.select(StreamSource.Desktop))
         s.sendJson(Kind.GESTURE, Payloads.gesture(name, fingers))
     }
