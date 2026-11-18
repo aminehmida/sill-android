@@ -64,6 +64,12 @@ sound, pinch to zoom, Larger Picture on phones, Reverse Scrolling, a hardware ke
 touchpad that work as soon as the picture shows, typing in Chinese, Japanese and Korean, your Macs
 as tiles in groups, and a foldable's laptop pose with the keys above the keyboard.
 
+Beyond the iPhone and iPad app: the keyboard comes up by itself when you click a text field on the
+Mac, and goes away when you click elsewhere (Settings › **Show Keyboard in Text Fields**). It needs
+a Sill for Mac that sends text focus, for now the build at
+[aminehmida/sill's releases](https://github.com/aminehmida/sill/releases); any other Mac simply
+never sends it.
+
 Compared with the iPhone and iPad app there is no USB-cable pairing, no Direct Wireless Connection
 and no first-run tour; `docs/DEVELOPMENT.md` lists the rest, and maps each Kotlin file to its Swift
 counterpart.

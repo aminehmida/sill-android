@@ -70,5 +70,6 @@ jobs:
             Sill for Android, built from this tag by GitHub Actions and signed with this repository's release key.
             Install the APK directly, or add this repository to [Obtainium](https://github.com/ImranR98/Obtainium) to get updates.
             Needs Sill for Mac 0.4.0 or later ([getsill.app](https://getsill.app)), 0.6.1 for copy and paste, the Mac's sound and a locked Mac's cover, and Android 10 or later.
+            The keyboard comes up by itself in a Mac text field with a Sill for Mac build that sends text focus ([aminehmida/sill](https://github.com/aminehmida/sill/releases)); turn it off in Settings › Show Keyboard in Text Fields.
 
             Code by [Omar Marei](https://github.com/omarei-omoto) ([Saffsanity/sill#89](https://github.com/Saffsanity/sill/pull/89)); Sill is by [Noah Saffer](https://github.com/Saffsanity). Apache License 2.0.
