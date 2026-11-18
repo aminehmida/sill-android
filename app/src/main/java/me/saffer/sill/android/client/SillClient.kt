@@ -40,6 +40,7 @@ import me.saffer.sill.android.protocol.Input
 import me.saffer.sill.android.protocol.Kind
 import me.saffer.sill.android.protocol.LockedMac
 import me.saffer.sill.android.protocol.ScrollDirection
+import me.saffer.sill.android.protocol.TextFocus
 import me.saffer.sill.android.protocol.MacInfo
 import me.saffer.sill.android.protocol.MacMenu
 import me.saffer.sill.android.protocol.MacMenuItem
@@ -158,6 +159,12 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
     /** Reverse Scrolling (ScrollDirection): the input views read the same preference when a scroll begins. */
     var reverseScroll by mutableStateOf(prefs.getBoolean(ScrollDirection.PREF, false)); private set
     fun changeReverseScroll(on: Boolean) { noteAction(); reverseScroll = on; prefs.edit().putBoolean(ScrollDirection.PREF, on).apply() }
+    /** Show Keyboard in Text Fields: the keyboard comes up by itself when the Mac's focus is in a text field (kind 64). */
+    var autoKeyboard by mutableStateOf(prefs.getBoolean("autoKeyboard", true)); private set
+    fun changeAutoKeyboard(on: Boolean) { noteAction(); autoKeyboard = on; prefs.edit().putBoolean("autoKeyboard", on).apply() }
+    /** The Mac's last kind 64, and a count of them: a click in a field sends the same focus again, which counts. */
+    var macTextFocus by mutableStateOf<TextFocus?>(null); private set
+    var textFocusCount by mutableIntStateOf(0); private set
     /** Hold to Show Window Controls, in seconds (0.2 to 2; 0.5 by default). */
     var holdToShowControls by mutableStateOf(prefs.getFloat("holdToShowControls", 0.5f).toDouble()); private set
     fun changeHoldToShowControls(s: Double) { holdToShowControls = s.coerceIn(0.2, 2.0); prefs.edit().putFloat("holdToShowControls", holdToShowControls.toFloat()).apply() }
@@ -370,6 +377,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
                 val hello = Payloads.hello(
                     BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toString(), deviceLabel,
                     audio = sound?.codecs?.takeIf { it.isNotEmpty() }, offConsoleView = LockedMac.VIEW_GENERATION,
+                    textFocus = TextFocus.GENERATION,
                 )
                 val s = Session(conn, deviceLabel, hello, this, soundStats = { sound?.takeSecond() })
                 main.post {
@@ -557,6 +565,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
         route = null
         hostClipboard = 0; hostKeyRepeat = 0
         lockWhy = null; offConsoleView = false; setShade(null)
+        macTextFocus = null
         sound?.stop()
         clipboard?.onSessionEnded()
         recovery.reset(); keyframeCheck?.let(main::removeCallbacks); keyframeCheck = null
@@ -667,6 +676,7 @@ class SillClient(private val app: Context) : Session.Listener, VideoDecoder.Even
             // A goodbye without a readable reason is a notice that asks for nothing: no reconnect (GoodbyePolicy).
             Kind.GOODBYE -> goodbye = Goodbye.parse(msg.payload) ?: Goodbye("", null, null, null)
             Kind.CLIPBOARD -> clipboard?.onMessage(msg.payload)
+            Kind.TEXT_FOCUS -> TextFocus.parse(msg.payload)?.let { macTextFocus = it; textFocusCount++ }
             Kind.PONG -> (clipboard as? me.saffer.sill.android.clipboard.ClipboardSync)?.onReceipt(msg.payload)
             Kind.MAC_MENU -> MacMenu.parse(msg.payload)?.let { m ->
                 when (val o = menuState.receive(m)) {

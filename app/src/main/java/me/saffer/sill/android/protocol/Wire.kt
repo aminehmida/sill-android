@@ -54,6 +54,9 @@ object Kind {
     const val AUDIO = 43
     // Device → host, empty payload: this device's picture was interrupted and waits for a keyframe.
     const val KEYFRAME_REQUEST = 44
+    // Host → device: whether the Mac's focused element takes text (TextFocus.swift), only to a device whose
+    // hello says `textFocus` ≥ 1, on a change.
+    const val TEXT_FOCUS = 64
 }
 
 class Message(val kind: Int, val timestamp: Double, val isKeyframe: Boolean, val payload: ByteArray)

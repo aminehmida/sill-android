@@ -268,6 +268,8 @@ fun SettingsPanel(client: SillClient, modifier: Modifier, onDone: () -> Unit, on
             else Note("Swipe up: Mission Control. Down: App Exposé. Left and right: Spaces. Pinch: Apps. Spread: Desktop.")
             Toggle("Reverse Scrolling", client.reverseScroll) { client.changeReverseScroll(it) }
             Note("A finger dragged over the picture, or two fingers on the trackpad below it, scroll the other way. A connected mouse or trackpad keeps the system’s own setting.")
+            Toggle("Show Keyboard in Text Fields", client.autoKeyboard) { client.changeAutoKeyboard(it) }
+            Note("The keyboard comes up by itself when you click a text field on ${client.macName}, and goes away when you click elsewhere. Needs Sill for Mac with text focus; some apps don’t say where their text fields are.")
             HoldStepper(client.holdToShowControls) { client.changeHoldToShowControls(it) }
             if (word == "phone") {
                 Toggle("Larger Picture", client.largerPicture) { client.changeLargerPicture(it) }

@@ -133,8 +133,11 @@ fun StreamScreen(client: SillClient) {
     LaunchedEffect(client.active) { sink?.forgetTyped() }
     DisposableEffect(Unit) { onDispose { client.onCaretMayMove = null } }
     var keyboardWanted by remember { mutableStateOf(false) }
+    // The keyboard the Mac's focus brought up (kind 64), which focus leaving the field puts away again;
+    // one the person brought up stays until they put it away.
+    var keyboardByFocus by remember { mutableStateOf(false) }
     val imeVisible = WindowInsets.isImeVisible
-    LaunchedEffect(imeVisible) { if (!imeVisible) keyboardWanted = false }
+    LaunchedEffect(imeVisible) { if (!imeVisible) { keyboardWanted = false; keyboardByFocus = false } }
     // A panel takes the keyboard (HardwareKeyboardPolicy's takers): its keys reach nothing on the Mac, and
     // Esc falls through to Back, which closes it. Once it closes, hardware keys go to the Mac again.
     LaunchedEffect(overlay, sink) {
@@ -144,7 +147,18 @@ fun StreamScreen(client: SillClient) {
 
     fun toggleKeyboard() {
         val s = sink ?: return
+        keyboardByFocus = false
         if (keyboardWanted || imeVisible) { keyboardWanted = false; s.hide() } else { overlay = Overlay.NONE; keyboardWanted = true; s.show() }
+    }
+    // The Mac's focus moved into a text field, or out of one (kind 64; each one counts, a click in a field
+    // sends the same focus again). Never while a panel is open: it holds the keyboard.
+    LaunchedEffect(client.textFocusCount) {
+        val focus = client.macTextFocus ?: return@LaunchedEffect
+        val s = sink ?: return@LaunchedEffect
+        if (!client.autoKeyboard || overlay != Overlay.NONE) return@LaunchedEffect
+        val up = keyboardWanted || imeVisible
+        if (focus.editable && !up) { keyboardWanted = true; keyboardByFocus = true; s.show() }
+        else if (!focus.editable && up && keyboardByFocus) { keyboardWanted = false; keyboardByFocus = false; s.hide() }
     }
     fun open(o: Overlay) {
         if (o != Overlay.NONE && keyboardWanted) { sink?.hide(); keyboardWanted = false }

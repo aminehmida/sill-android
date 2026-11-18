@@ -101,12 +101,17 @@ object Payloads {
     /**
      * Kind 23, the first message of every session connection. `audio`: the codecs of the Mac's sound
      * this device plays, best first (a host sends kind 43 only then); `offConsoleView`: this device
-     * shows a Mac's off-console view (LockedMac.VIEW_GENERATION).
+     * shows a Mac's off-console view (LockedMac.VIEW_GENERATION); `textFocus`: this device shows its keyboard
+     * by itself when the Mac's focus is in a text field (TextFocus.GENERATION), so a host sends it kind 64.
      */
-    fun hello(appVersion: String, build: String, device: String, audio: List<String>? = null, offConsoleView: Int? = null): String {
+    fun hello(
+        appVersion: String, build: String, device: String, audio: List<String>? = null, offConsoleView: Int? = null,
+        textFocus: Int? = null,
+    ): String {
         val o = JSONObject().put("appVersion", appVersion).put("build", build).put("protocol", 1).put("device", device)
         audio?.let { o.put("audio", JSONArray(it)) }
         offConsoleView?.let { o.put("offConsoleView", it) }
+        textFocus?.let { o.put("textFocus", it) }
         return o.toString()
     }
 
@@ -362,6 +367,19 @@ data class MacPointer(val x: Double?, val y: Double?, val inside: Boolean, val s
         fun parse(bytes: ByteArray): MacPointer? = runCatching {
             val o = JSONObject(String(bytes, Charsets.UTF_8))
             MacPointer(o.optDoubleOrNull("x"), o.optDoubleOrNull("y"), o.optBoolean("inside"), o.optInt("seen", 0))
+        }.getOrNull()
+    }
+}
+
+/** Kind 64: whether the Mac's focused element takes text, and whether it is a password field. */
+data class TextFocus(val editable: Boolean, val secure: Boolean) {
+    companion object {
+        /** The generation of kind 64 this build reads (the hello's `textFocus`). */
+        const val GENERATION = 1
+        fun parse(bytes: ByteArray): TextFocus? = runCatching {
+            val o = JSONObject(String(bytes, Charsets.UTF_8))
+            val editable = o.getBoolean("editable")
+            TextFocus(editable, editable && o.optBoolean("secure", false))
         }.getOrNull()
     }
 }
